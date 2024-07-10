@@ -1,0 +1,43 @@
+name: checks
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - "*"
+
+permissions:
+  actions: write
+
+jobs:
+  checks:
+    name: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: setup python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+      - name: cache models and datasets
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cache/huggingface
+          # update the date to invalidate the cache when new models/datasets are added
+          key: ${{ runner.os }}-hf-cache-2024.7.10
+      - name: dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+      - name: black
+        run: black --check .
+      - name: isort
+        run: isort --check .
+      - name: pytest
+        run: pytest
