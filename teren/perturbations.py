@@ -6,25 +6,23 @@ from sae_lens import SAE
 
 
 class Perturbation(ABC):
-    @staticmethod
     @abstractmethod
-    def __call__(
-        resid_acts: Float[torch.Tensor, "... n_ctx d_model"], **kwargs
+    def __new__(
+        cls, resid_acts: Float[torch.Tensor, "... n_ctx d_model"], **kwargs
     ) -> Float[torch.Tensor, "... n_ctx d_model"]:
         raise NotImplementedError
 
 
 class NaiveRandomPerturbation(Perturbation):
-    @staticmethod
-    def __call__(
-        resid_acts: Float[torch.Tensor, "... n_ctx d_model"], **kwargs
+    def __new__(
+        cls, resid_acts: Float[torch.Tensor, "... n_ctx d_model"], **kwargs
     ) -> Float[torch.Tensor, "... n_ctx d_model"]:
         return torch.randn(resid_acts.shape)
 
 
 class TowardSAEReconPerturbation(Perturbation):
-    @staticmethod
-    def __call__(
+    def __new__(
+        cls,
         resid_acts: Float[torch.Tensor, "... n_ctx d_model"],
         feature_acts: Float[torch.Tensor, "... n_ctx d_sae"],
         sae: SAE,
@@ -34,9 +32,8 @@ class TowardSAEReconPerturbation(Perturbation):
 
 
 class AlongResidActsPerturbation(Perturbation):
-    @staticmethod
-    def __call__(
-        resid_acts: Float[torch.Tensor, "... n_ctx d_model"],
+    def __new__(
+        cls, resid_acts: Float[torch.Tensor, "... n_ctx d_model"]
     ) -> Float[torch.Tensor, "... n_ctx d_model"]:
         """Scale the residuals"""
         return resid_acts
