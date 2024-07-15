@@ -11,13 +11,17 @@ from sae_lens import SAE
 class Perturbation(ABC):
     @final
     def __call__(
-        self, resid_acts: Float[torch.Tensor, "... n_ctx d_model"]
-    ) -> Float[torch.Tensor, "... n_ctx d_model"]:
+        self, resid_acts: Float[torch.Tensor, "*batch seq model"]
+    ) -> Float[torch.Tensor, "*batch seq model"]:
         """Ensures that all generate method has correct signature with beartype"""
-        return self.generate(resid_acts)
+        perturb = self.generate(resid_acts)
+        assert perturb.device == resid_acts.device
+        # FIXME: we want something like np.shares_memory, this isn't it
+        assert resid_acts.data_ptr() != perturb.data_ptr()
+        return perturb
 
     @abstractmethod
-    def generate(self, resid_acts: Float[torch.Tensor, "... n_ctx d_model"]):
+    def generate(self, resid_acts: Float[torch.Tensor, "*batch seq model"]):
         raise NotImplementedError
 
 
@@ -26,7 +30,7 @@ class NaiveRandomPerturbation(Perturbation):
     """Isotropic random"""
 
     def generate(self, resid_acts):
-        return torch.randn(resid_acts.shape)
+        return torch.randn(resid_acts.shape, device=resid_acts.device)
 
 
 naive_random_perturbation = NaiveRandomPerturbation()
@@ -47,7 +51,17 @@ class AmplifyResidActsPerturbation(Perturbation):
     """Amplify the residual stream"""
 
     def generate(self, resid_acts):
-        return resid_acts
+        return resid_acts.clone()
 
 
 amplify_resid_acts_perturbation = AmplifyResidActsPerturbation()
+
+
+class DampenResidActsPerturbation(Perturbation):
+    """Dampen the residual stream"""
+
+    def generate(self, resid_acts):
+        return -resid_acts.clone()
+
+
+dampen_resid_acts_perturbation = DampenResidActsPerturbation()
