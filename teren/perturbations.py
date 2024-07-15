@@ -6,9 +6,10 @@ import numpy as np
 import torch
 from jaxtyping import Float
 from sae_lens import SAE
+from torch.distributions.multivariate_normal import MultivariateNormal
 
 from teren.config import Reference
-from teren.utils import compute_kl_div
+from teren.utils import compute_kl_div, generate_prompt, set_seed
 
 
 @dataclass(kw_only=True)
@@ -33,7 +34,29 @@ class NaiveRandomPerturbation(Perturbation):
         return torch.randn(resid_acts.shape)
 
 
-naive_random_perturbation = NaiveRandomPerturbation()
+@dataclass
+class RandomPerturbation(Perturbation):
+    """Scaled random"""
+
+    def __init__(self, dataset, model, cfg):
+        set_seed(cfg.seed)
+        tensor_of_prompts = generate_prompt(
+            dataset, n_ctx=cfg.n_ctx, batch=cfg.mean_batch_size
+        )
+        mean_act_cache = model.run_with_cache(tensor_of_prompts)[1].to("cpu")
+
+        data = mean_act_cache[cfg.perturbation_layer][:, -1, :]
+        data_mean = data.mean(dim=0, keepdim=True)
+
+        data_cov = (
+            torch.einsum("i j, i k -> j k", data - data_mean, data - data_mean)
+            / data.shape[0]
+        )
+        self.distrib = MultivariateNormal(data_mean.squeeze(0), data_cov)
+
+    def generate(self, resid_acts):
+        target = self.distrib.sample(resid_acts.shape[:-1])
+        return target - resid_acts
 
 
 @dataclass

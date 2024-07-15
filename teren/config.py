@@ -15,6 +15,7 @@ class ExperimentConfig:
     perturbation_range: Tuple[float, float]
     seed: Optional[int] = None
     dataloader_batch_size: Optional[int] = None
+    mean_batch_size: Optional[int] = None
 
 
 class Reference:

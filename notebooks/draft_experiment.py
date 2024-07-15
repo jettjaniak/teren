@@ -8,18 +8,24 @@ from tqdm import tqdm
 from transformer_lens import HookedTransformer
 
 from teren.config import ExperimentConfig, Reference
-from teren.perturbations import compare, naive_random_perturbation, scan
+from teren.perturbations import (
+    NaiveRandomPerturbation,
+    RandomPerturbation,
+    compare,
+    scan,
+)
 from teren.utils import generate_prompt, load_pretokenized_dataset, set_seed
 
 cfg = ExperimentConfig(
     n_ctx=10,
     perturbation_layer="blocks.1.hook_resid_pre",
-    seed=3,
+    seed=2,
     dataloader_batch_size=15,
     perturbation_pos=slice(-1, None, 1),
     read_layer="blocks.11.hook_resid_post",
     perturbation_range=(0.0, np.pi),
     n_steps=361,
+    mean_batch_size=1500,
 )
 
 # %%
@@ -52,7 +58,15 @@ base_ref = Reference(
 
 # %%
 
-results = []
+naive_random_perturbation = NaiveRandomPerturbation()
+
+# %%
+
+random_perturbation = RandomPerturbation(dataset, model, cfg)
+
+# %%
+
+results = {"naive_rand": [], "rand": []}
 
 for _ in tqdm(range(20)):
     naive_rand_perturbation = naive_random_perturbation(base_ref.act)
@@ -62,10 +76,21 @@ for _ in tqdm(range(20)):
         n_steps=cfg.n_steps,
         range=cfg.perturbation_range,
     )
-    result = compare(base_ref, perturbed_activations)
-    results.append(result)
+    results["naive_rand"].append(compare(base_ref, perturbed_activations))
+
+    rand_perturbation = random_perturbation(base_ref.act)
+    perturbed_activations = scan(
+        perturbation=random_perturbation,
+        activations=base_ref.act,
+        n_steps=cfg.n_steps,
+        range=cfg.perturbation_range,
+    )
+    results["rand"].append(compare(base_ref, perturbed_activations))
 
 # %%
-for result in results:
-    plt.plot(result)
+colors = {"rand": "red", "naive_rand": "purple"}
+
+for perturb_name in ["rand", "naive_rand"]:
+    for data in results[perturb_name]:
+        plt.plot(data, color=colors[perturb_name])
 # %%
