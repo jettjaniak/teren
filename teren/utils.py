@@ -22,7 +22,7 @@ def load_and_tokenize_dataset(
     tokenizer: PreTrainedTokenizerBase,
     max_length: int,
 ) -> Int[torch.Tensor, "batch seq"]:
-    dataset = load_dataset(path, split=split)
+    dataset = load_dataset(path, split=split, trust_remote_code=True)
     dataset = cast(Dataset, dataset)
     hf_dataset = tl_utils.tokenize_and_concatenate(
         dataset,
@@ -52,6 +52,9 @@ def compute_loss(
     start_at_layer: int,
     batch_size: int,
 ) -> Float[torch.Tensor, "*batch seq"]:
+    assert (
+        input_ids.shape == resid_acts.shape[:-1]
+    ), f"{input_ids.shape=} {resid_acts.shape=}"
     batch_shape = input_ids.shape[:-1]
     d_seq, d_model = resid_acts.shape[-2:]
     resid_acts_flat = resid_acts.view(-1, d_seq, d_model)
