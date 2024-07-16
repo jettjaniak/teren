@@ -15,6 +15,10 @@ class SAEExamplesByFeature:
     resid_acts: Float[torch.Tensor, "feature n_examples seq model"]
     clean_loss: Float[torch.Tensor, "feature n_examples seq"]
 
+    @property
+    def n_active_features(self):
+        return len(self.active_feature_ids)
+
 
 @dataclass
 class SAEExamplesBatchByFeature:
@@ -55,14 +59,20 @@ class SAEExamplesListsByFeature:
         resid_acts_list = []
         loss_list = []
         for feature_id, this_input_ids_list in self.input_ids.items():
-            # TODO: don't cat everything, just as much as needed - to save memory
-            this_input_ids = torch.cat(this_input_ids_list)[:n_examples]
-            if this_input_ids.shape[0] < n_examples:
+            total_examples = 0
+            n_batches = 0
+            for this_batch_input_ids in this_input_ids_list:
+                total_examples += this_batch_input_ids.shape[0]
+                n_batches += 1
+                if total_examples >= n_examples:
+                    break
+            if total_examples < n_examples:
                 continue
+            this_input_ids = torch.cat(this_input_ids_list[:n_batches])[:n_examples]
             this_resid_acts_list = self.resid_acts[feature_id]
-            this_resid_acts = torch.cat(this_resid_acts_list)[:n_examples]
+            this_resid_acts = torch.cat(this_resid_acts_list[:n_batches])[:n_examples]
             this_loss_list = self.clean_loss[feature_id]
-            this_loss = torch.cat(this_loss_list)[:n_examples]
+            this_loss = torch.cat(this_loss_list[:n_batches])[:n_examples]
             assert (
                 this_resid_acts.shape[0]
                 == this_input_ids.shape[0]
