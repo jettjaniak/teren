@@ -68,15 +68,18 @@ class RandomActivationPerturbation(Perturbation):
 
 @dataclass
 class SAEDecoderDirectionPerturbation(Perturbation):
-    def __init__(self, base_ref: Reference, unrelated_ref: Reference, sae):
+    def __init__(
+        self, base_ref: Reference, unrelated_ref: Reference, sae, negate=-1, thresh=0.1
+    ):
         self.base_ref = base_ref
         self.unrelated_ref = unrelated_ref
         self.sae = sae
-        self.negate = -1
+        self.negate = negate
+        self.thresh = thresh
         self.feature_acts = sae.encode(base_ref.cache[sae.cfg.hook_name])[0, -1, :]
-        self.active_features = (self.feature_acts / self.feature_acts.max() > 0.1).to(
-            "cpu"
-        )
+        self.active_features = (
+            self.feature_acts / self.feature_acts.max() > self.thresh
+        ).to("cpu")
         print("Using active features:", self.active_features.nonzero(as_tuple=True)[0])
 
     def generate(self, resid_acts):
@@ -93,7 +96,7 @@ class SAEDecoderDirectionPerturbation(Perturbation):
             dir = single_dir.unsqueeze(0)
 
         scale = self.feature_acts[chosen_feature_idx]
-        return resid_acts + dir * scale
+        return dir * scale
 
 
 @dataclass
