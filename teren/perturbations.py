@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from random import choice
 from typing import final
 
 import numpy as np
@@ -8,8 +9,8 @@ from jaxtyping import Float
 from sae_lens import SAE
 from torch.distributions.multivariate_normal import MultivariateNormal
 
-from teren.config import Reference
-from teren.utils import compute_kl_div, generate_prompt, set_seed
+from teren.config import ExperimentConfig, Reference
+from teren.utils import compute_kl_div, generate_prompt, get_random_activation, set_seed
 
 
 @dataclass(kw_only=True)
@@ -38,25 +39,61 @@ class NaiveRandomPerturbation(Perturbation):
 class RandomPerturbation(Perturbation):
     """Scaled random"""
 
-    def __init__(self, dataset, model, cfg):
-        set_seed(cfg.seed)
-        tensor_of_prompts = generate_prompt(
-            dataset, n_ctx=cfg.n_ctx, batch=cfg.mean_batch_size
-        )
-        mean_act_cache = model.run_with_cache(tensor_of_prompts)[1].to("cpu")
-
-        data = mean_act_cache[cfg.perturbation_layer][:, -1, :]
-        data_mean = data.mean(dim=0, keepdim=True)
-
-        data_cov = (
-            torch.einsum("i j, i k -> j k", data - data_mean, data - data_mean)
-            / data.shape[0]
-        )
+    def __init__(self, data_mean, data_cov):
         self.distrib = MultivariateNormal(data_mean.squeeze(0), data_cov)
 
     def generate(self, resid_acts):
         target = self.distrib.sample(resid_acts.shape[:-1])
         return target - resid_acts
+
+
+@dataclass
+class RandomActivationPerturbation(Perturbation):
+    """Random activation direction"""
+
+    def __init__(self, base_ref, dataset):
+        self.base_ref = base_ref
+        self.dataset = dataset
+
+    def generate(self, resid_acts):
+        target = get_random_activation(
+            self.base_ref.model,
+            self.dataset,
+            self.base_ref.n_ctx,
+            self.base_ref.perturbation_layer,
+            self.base_ref.perturbation_pos,
+        )
+        return target - resid_acts
+
+
+@dataclass
+class SAEDecoderDirectionPerturbation(Perturbation):
+    def __init__(self, base_ref: Reference, unrelated_ref: Reference, sae):
+        self.base_ref = base_ref
+        self.unrelated_ref = unrelated_ref
+        self.sae = sae
+        self.negate = -1
+        self.feature_acts = sae.encode(base_ref.cache[sae.cfg.hook_name])[0, -1, :]
+        self.active_features = (self.feature_acts / self.feature_acts.max() > 0.1).to(
+            "cpu"
+        )
+        print("Using active features:", self.active_features.nonzero(as_tuple=True)[0])
+
+    def generate(self, resid_acts):
+        chosen_feature_idx = choice(self.active_features.nonzero(as_tuple=True)[0])
+        single_dir = (
+            self.negate * self.sae.W_dec[chosen_feature_idx, :].to("cpu").detach()
+        )
+
+        if isinstance(self.base_ref.perturbation_pos, slice):
+            dir = torch.stack(
+                [single_dir for _ in range(self.base_ref.act.shape[0])]
+            ).unsqueeze(0)
+        else:
+            dir = single_dir.unsqueeze(0)
+
+        scale = self.feature_acts[chosen_feature_idx]
+        return resid_acts + dir * scale
 
 
 @dataclass
@@ -131,6 +168,19 @@ def scan(
     ]
     perturbed_activations = torch.cat(perturbed_steps, dim=0)
     return perturbed_activations
+
+
+def run_perturbation(
+    cfg: ExperimentConfig, base_ref: Reference, perturbation: Perturbation
+):
+    perturbed_activations = scan(
+        perturbation=perturbation,
+        activations=base_ref.act,
+        n_steps=cfg.n_steps,
+        range=cfg.perturbation_range,
+    )
+    kl_div = compare(base_ref, perturbed_activations)
+    return kl_div
 
 
 # %%

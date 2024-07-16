@@ -6,8 +6,15 @@ import torch
 import torch.nn.functional as F
 from datasets import Dataset, load_dataset
 from jaxtyping import Int
+from transformer_lens import HookedTransformer
 from transformer_lens import utils as tl_utils
 from transformers import PreTrainedTokenizerBase
+
+
+def set_seed(seed: int):
+    """Set the random seed for reproducibility."""
+    torch.manual_seed(seed)
+    np.random.seed(seed)
 
 
 def get_device_str() -> str:
@@ -67,3 +74,12 @@ def compute_kl_div(logits_ref: torch.Tensor, logits_pert: torch.Tensor) -> torch
         logprobs_pert, logprobs_ref, log_target=True, reduction="none"
     )
     return temp_output.sum(dim=-1)
+
+
+def get_random_activation(
+    model: HookedTransformer, dataset: Dataset, n_ctx: int, layer: str, pos
+) -> torch.Tensor:
+    """Get a random activation from the dataset."""
+    rand_prompt = generate_prompt(dataset, n_ctx=n_ctx)
+    _, cache = model.run_with_cache(rand_prompt)
+    return cache[layer][:, pos, :].to("cpu").detach()
