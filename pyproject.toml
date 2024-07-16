@@ -3,7 +3,7 @@ name = "teren"
 dynamic = ["version"]
 dependencies = [
     "beartype==0.18.5",
-    "black==24.4.2",
+    "black[jupyter]==24.4.2",
     "datasets==2.20.0",
     "fancy-einsum==0.0.3",
     "ipykernel==6.29.5",
