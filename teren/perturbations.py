@@ -57,6 +57,7 @@ class AmplifyResidActsPerturbation(Perturbation):
     resid_mean: Float[torch.Tensor, "seq model"]
 
     def generate(self, resid_acts):
+        # FIXME: compute this with running average from the whole dataset
         return resid_acts.clone() - self.resid_mean
 
 
