@@ -112,7 +112,7 @@ def get_sae_examples_batch_by_feature(
     return ret
 
 
-def get_examples_by_feature_by_sae(
+def get_examples_by_feature_by_layer_and_resid_mean_by_layer(
     input_ids: Int[torch.Tensor, "batch seq"],
     model: HookedTransformer,
     sae_by_layer: dict[int, SAE],
@@ -163,8 +163,8 @@ def get_examples_by_feature_by_sae(
             sae_examples_lists_by_feature.update(sae_examples_batch_by_feature)
 
     examples_by_feature_by_layer = {
-        layer: sae_examples_lists_by_feature_by_layer[layer].filter_and_cat(n_examples)
-        for layer in sae_by_layer.keys()
+        layer: sae_examples_lists_by_feature.filter_and_cat(n_examples)
+        for layer, sae_examples_lists_by_feature in sae_examples_lists_by_feature_by_layer.items()
     }
     resid_mean_by_layer = {
         layer: resid_sum.cpu() / n_inputs
