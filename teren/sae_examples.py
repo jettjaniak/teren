@@ -115,20 +115,28 @@ def get_sae_examples_batch_by_feature(
 def get_examples_by_feature_by_sae(
     input_ids: Int[torch.Tensor, "batch seq"],
     model: HookedTransformer,
-    saes: list[SAE],
+    sae_by_layer: dict[int, SAE],
     feature_ids: Iterable[int],
     n_examples: int,
     batch_size: int,
     min_activation=0.0,
-) -> list[SAEExamplesByFeature]:
+) -> tuple[
+    dict[int, SAEExamplesByFeature], dict[int, Float[torch.Tensor, "seq d_model"]]
+]:
     feature_ids = tuple(feature_ids)
-    sae_examples_lists_by_feature_by_sae = [SAEExamplesListsByFeature() for _ in saes]
+    sae_examples_lists_by_feature_by_layer = {
+        layer: SAEExamplesListsByFeature() for layer in sae_by_layer.keys()
+    }
 
-    n_inputs = input_ids.shape[0]
+    n_inputs, seq_len = input_ids.shape
+    resid_sum_by_layer = {
+        layer: torch.zeros((seq_len, model.cfg.d_model), device=model.cfg.device)
+        for layer in sae_by_layer.keys()
+    }
     for i in range(0, n_inputs, batch_size):
         # no need to move to device, as long as model is on a correct device
         batch_input_ids = input_ids[i : i + batch_size]
-        names_filter = [sae.cfg.hook_name for sae in saes]
+        names_filter = [sae.cfg.hook_name for sae in sae_by_layer.values()]
         batch_loss, batch_cache = model.run_with_cache(
             batch_input_ids,
             names_filter=names_filter,
@@ -136,10 +144,14 @@ def get_examples_by_feature_by_sae(
             loss_per_token=True,
         )
 
-        for sae, sae_examples_lists_by_feature in zip(
-            saes, sae_examples_lists_by_feature_by_sae
+        for sae, sae_examples_lists_by_feature, resid_sum in zip(
+            sae_by_layer.values(),
+            sae_examples_lists_by_feature_by_layer.values(),
+            resid_sum_by_layer.values(),
         ):
             batch_resid_acts = batch_cache[sae.cfg.hook_name]
+            batch_resid_sum = batch_resid_acts.sum(dim=0)
+            resid_sum += batch_resid_sum
             sae_examples_batch_by_feature = get_sae_examples_batch_by_feature(
                 input_ids=batch_input_ids,
                 resid_acts=batch_resid_acts,
@@ -150,7 +162,13 @@ def get_examples_by_feature_by_sae(
             )
             sae_examples_lists_by_feature.update(sae_examples_batch_by_feature)
 
-    return [
-        sae_examples_lists_by_feature.filter_and_cat(n_examples)
-        for sae_examples_lists_by_feature in sae_examples_lists_by_feature_by_sae
-    ]
+    examples_by_feature_by_layer = {
+        layer: sae_examples_lists_by_feature_by_layer[layer].filter_and_cat(n_examples)
+        for layer in sae_by_layer.keys()
+    }
+    resid_mean_by_layer = {
+        layer: resid_sum.cpu() / n_inputs
+        for layer, resid_sum in resid_sum_by_layer.items()
+    }
+
+    return examples_by_feature_by_layer, resid_mean_by_layer
