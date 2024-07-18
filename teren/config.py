@@ -16,6 +16,7 @@ class ExperimentConfig:
     seed: Optional[int] = None
     dataloader_batch_size: Optional[int] = None
     mean_batch_size: Optional[int] = None
+    sae_threshold: Optional[float] = None
 
 
 class Reference:
