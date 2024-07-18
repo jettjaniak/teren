@@ -6,7 +6,7 @@ import torch
 from jaxtyping import Float
 from sae_lens import SAE
 
-from teren.typing import FeatureId
+from teren.typing import *
 
 
 @dataclass(kw_only=True)
@@ -28,9 +28,9 @@ class Perturbation(ABC):
     def generate(self, resid_acts: Float[torch.Tensor, "*batch seq model"]):
         raise NotImplementedError
 
-    @abstractmethod
     @classmethod
-    def get_pert_by_fid(cls, **kwargs) -> dict[FeatureId, "Perturbation"]:
+    @abstractmethod
+    def get_pert_by_fid(cls, **kwargs) -> Mapping[FeatureId, "Perturbation"]:
         raise NotImplementedError
 
 
@@ -44,7 +44,7 @@ class NaiveRandomPerturbation(Perturbation):
     @classmethod
     def get_pert_by_fid(
         cls, fids: Iterable[FeatureId]
-    ) -> dict[FeatureId, "NaiveRandomPerturbation"]:
+    ) -> Mapping[FeatureId, "NaiveRandomPerturbation"]:
         pert = cls()
         return {fid: pert for fid in fids}
 
@@ -63,7 +63,7 @@ class TowardSAEReconPerturbation(Perturbation):
     @classmethod
     def get_pert_by_fid(
         cls, fids: Iterable[FeatureId], sae: SAE
-    ) -> dict[FeatureId, "TowardSAEReconPerturbation"]:
+    ) -> Mapping[FeatureId, "TowardSAEReconPerturbation"]:
         pert = cls(sae=sae)
         return {fid: pert for fid in fids}
 
@@ -81,7 +81,7 @@ class AmplifyResidActsPerturbation(Perturbation):
     @classmethod
     def get_pert_by_fid(
         cls, fids: Iterable[FeatureId], resid_mean: Float[torch.Tensor, "seq model"]
-    ) -> dict[FeatureId, "AmplifyResidActsPerturbation"]:
+    ) -> Mapping[FeatureId, "AmplifyResidActsPerturbation"]:
         pert = cls(resid_mean=resid_mean)
         return {fid: pert for fid in fids}
 
@@ -134,7 +134,7 @@ class AmplifySEAFeaturePerturbation(Perturbation):
     @classmethod
     def get_pert_by_fid(
         cls, fids: Iterable[FeatureId], sae: SAE
-    ) -> dict[FeatureId, "AmplifySEAFeaturePerturbation"]:
+    ) -> Mapping[FeatureId, "AmplifySEAFeaturePerturbation"]:
         return {fid: cls(sae=sae, fid=fid) for fid in fids}
 
 

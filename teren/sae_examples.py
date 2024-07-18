@@ -1,59 +1,74 @@
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 
 import torch
-from jaxtyping import Float, Int
 from sae_lens import SAE
 from transformer_lens import HookedTransformer
 
+from teren.perturbations import Perturbation
+from teren.typing import *
+
 
 @dataclass
-class SAEExamplesByFeature:
-    active_feature_ids: list[int]
+class SAEFeatureExamples:
+    fids: list[FeatureId]
     input_ids: Int[torch.Tensor, "feature n_examples seq"]
     resid_acts: Float[torch.Tensor, "feature n_examples seq model"]
     clean_loss: Float[torch.Tensor, "feature n_examples seq"]
 
     @property
     def n_active_features(self):
-        return len(self.active_feature_ids)
+        return len(self.fids)
+
+    def fid_to_idx(self, fid: FeatureId) -> int:
+        return self.fids.index(fid)
+
+    def compute_pert_vectors(
+        self, pert_by_fid: Mapping[FeatureId, Perturbation]
+    ) -> Float[torch.Tensor, "feature n_examples seq model"]:
+        assert set(pert_by_fid.keys()) == set(self.fids)
+        pert_vectors = torch.empty_like(self.resid_acts)
+        for fid_idx, fid in enumerate(self.fids):
+            feature_resid_acts = self.resid_acts[fid_idx]
+            pert = pert_by_fid[fid]
+            pert_vectors[fid_idx] = pert(feature_resid_acts)
+        return pert_vectors
 
 
 @dataclass
-class SAEExamplesBatchByFeature:
-    input_ids: dict[int, Int[torch.Tensor, "_examples seq"]] = field(
+class BatchSAEFeatureExamples:
+    input_ids: dict[FeatureId, Int[torch.Tensor, "_examples seq"]] = field(
         default_factory=dict
     )
-    resid_acts: dict[int, Float[torch.Tensor, "_examples seq model"]] = field(
+    resid_acts: dict[FeatureId, Float[torch.Tensor, "_examples seq model"]] = field(
         default_factory=dict
     )
-    clean_loss: dict[int, Float[torch.Tensor, "_examples seq_m1"]] = field(
+    clean_loss: dict[FeatureId, Float[torch.Tensor, "_examples seq_m1"]] = field(
         default_factory=dict
     )
 
 
 @dataclass
-class SAEExamplesListsByFeature:
-    input_ids: dict[int, list[Int[torch.Tensor, "_examples seq"]]] = field(
+class ListsSAEFeatureExamples:
+    input_ids: Mapping[FeatureId, list[Int[torch.Tensor, "_examples seq"]]] = field(
         default_factory=lambda: defaultdict(list)
     )
-    resid_acts: dict[int, list[Float[torch.Tensor, "_examples seq model"]]] = field(
-        default_factory=lambda: defaultdict(list)
+    resid_acts: Mapping[FeatureId, list[Float[torch.Tensor, "_examples seq model"]]] = (
+        field(default_factory=lambda: defaultdict(list))
     )
-    clean_loss: dict[int, list[Float[torch.Tensor, "_examples seq_m1"]]] = field(
-        default_factory=lambda: defaultdict(list)
+    clean_loss: Mapping[FeatureId, list[Float[torch.Tensor, "_examples seq_m1"]]] = (
+        field(default_factory=lambda: defaultdict(list))
     )
 
-    def update(self, other: SAEExamplesBatchByFeature):
-        for feature_id, other_input_ids in other.input_ids.items():
-            other_resid_acts = other.resid_acts[feature_id]
-            other_clean_loss = other.clean_loss[feature_id]
+    def update(self, batch_sae_feature_examples: BatchSAEFeatureExamples):
+        for feature_id, other_input_ids in batch_sae_feature_examples.input_ids.items():
+            other_resid_acts = batch_sae_feature_examples.resid_acts[feature_id]
+            other_clean_loss = batch_sae_feature_examples.clean_loss[feature_id]
             self.input_ids[feature_id].append(other_input_ids)
             self.resid_acts[feature_id].append(other_resid_acts)
             self.clean_loss[feature_id].append(other_clean_loss)
 
-    def filter_and_cat(self, n_examples: int) -> SAEExamplesByFeature:
+    def filter_and_cat(self, n_examples: int) -> SAEFeatureExamples:
         active_feature_ids = []
         input_ids_list = []
         resid_acts_list = []
@@ -83,49 +98,49 @@ class SAEExamplesListsByFeature:
             input_ids_list.append(this_input_ids)
             resid_acts_list.append(this_resid_acts)
             loss_list.append(this_loss)
-        return SAEExamplesByFeature(
-            active_feature_ids=active_feature_ids,
+        return SAEFeatureExamples(
+            fids=active_feature_ids,
             input_ids=torch.stack(input_ids_list, dim=0),
             resid_acts=torch.stack(resid_acts_list, dim=0),
             clean_loss=torch.stack(loss_list, dim=0),
         )
 
 
-def get_sae_examples_batch_by_feature(
+def get_batch_sae_feature_examples(
     input_ids: Int[torch.Tensor, "batch seq"],
     resid_acts: Float[torch.Tensor, "batch seq d_model"],
     loss: Float[torch.Tensor, "batch seq_m1"],
     sae: SAE,
-    feature_ids: Sequence[int],
+    fids: list[FeatureId],
     min_activation,
-) -> SAEExamplesBatchByFeature:
-    ret = SAEExamplesBatchByFeature()
+) -> BatchSAEFeatureExamples:
+    ret = BatchSAEFeatureExamples()
     all_features_acts = sae.encode(resid_acts)
-    features_acts = all_features_acts[..., feature_ids]
+    fid_idxs = [fid.int for fid in fids]
+    features_acts = all_features_acts[..., fid_idxs]
     # max across the whole example
     max_feature_acts, _ = features_acts.max(dim=1)
-    for feature_id in feature_ids:
-        f_active_mask = max_feature_acts[:, feature_id] > min_activation
-        ret.resid_acts[feature_id] = resid_acts[f_active_mask].clone().cpu()
-        ret.input_ids[feature_id] = input_ids[f_active_mask.to(input_ids.device)]
-        ret.clean_loss[feature_id] = loss[f_active_mask].clone().cpu()
+    for fid, fid_idx in zip(fids, fid_idxs):
+        f_active_mask = max_feature_acts[:, fid_idx] > min_activation
+        ret.resid_acts[fid] = resid_acts[f_active_mask].clone().cpu()
+        ret.input_ids[fid] = input_ids[f_active_mask.to(input_ids.device)]
+        ret.clean_loss[fid] = loss[f_active_mask].clone().cpu()
     return ret
 
 
-def get_examples_by_feature_by_layer_and_resid_mean_by_layer(
+def get_sae_feature_examples_by_layer_and_resid_mean_by_layer(
     input_ids: Int[torch.Tensor, "batch seq"],
     model: HookedTransformer,
-    sae_by_layer: dict[int, SAE],
-    feature_ids: Iterable[int],
+    sae_by_layer: Mapping[int, SAE],
+    fids: list[FeatureId],
     n_examples: int,
     batch_size: int,
     min_activation=0.0,
 ) -> tuple[
-    dict[int, SAEExamplesByFeature], dict[int, Float[torch.Tensor, "seq d_model"]]
+    Mapping[int, SAEFeatureExamples], Mapping[int, Float[torch.Tensor, "seq d_model"]]
 ]:
-    feature_ids = tuple(feature_ids)
     sae_examples_lists_by_feature_by_layer = {
-        layer: SAEExamplesListsByFeature() for layer in sae_by_layer.keys()
+        layer: ListsSAEFeatureExamples() for layer in sae_by_layer.keys()
     }
 
     n_inputs, seq_len = input_ids.shape
@@ -152,12 +167,12 @@ def get_examples_by_feature_by_layer_and_resid_mean_by_layer(
             batch_resid_acts = batch_cache[sae.cfg.hook_name]
             batch_resid_sum = batch_resid_acts.sum(dim=0)
             resid_sum += batch_resid_sum
-            sae_examples_batch_by_feature = get_sae_examples_batch_by_feature(
+            sae_examples_batch_by_feature = get_batch_sae_feature_examples(
                 input_ids=batch_input_ids,
                 resid_acts=batch_resid_acts,
                 loss=batch_loss,  # type: ignore
                 sae=sae,
-                feature_ids=feature_ids,
+                fids=fids,
                 min_activation=min_activation,
             )
             sae_examples_lists_by_feature.update(sae_examples_batch_by_feature)
