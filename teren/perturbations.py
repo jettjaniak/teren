@@ -3,10 +3,14 @@ from dataclasses import dataclass
 from typing import Iterable, final
 
 import torch
+from datasets import Dataset
 from jaxtyping import Float
 from sae_lens import SAE
+from torch.distributions.multivariate_normal import MultivariateNormal
+from transformer_lens import HookedTransformer
 
 from teren.typing import FeatureId
+from teren.utils import get_random_activation
 
 
 @dataclass(kw_only=True)
@@ -46,6 +50,59 @@ class NaiveRandomPerturbation(Perturbation):
         cls, fids: Iterable[FeatureId]
     ) -> dict[FeatureId, "NaiveRandomPerturbation"]:
         pert = cls()
+        return {fid: pert for fid in fids}
+
+
+@dataclass(kw_only=True)
+class RandomPerturbation(Perturbation):
+    """random from the dataset"""
+
+    # We either calculate distrib outside and provide it here, or we need to have some kind of init to calculate it
+    distrib: MultivariateNormal
+
+    def generate(self, resid_acts):
+        target = self.distrib.sample(resid_acts.shape[:-1])
+        return target - resid_acts
+
+    @classmethod
+    def get_pert_by_fid(
+        cls, fids: Iterable[FeatureId], distrib: MultivariateNormal
+    ) -> dict[FeatureId, "RandomPerturbation"]:
+        pert = cls(distrib=distrib)
+        return {fid: pert for fid in fids}
+
+
+@dataclass(kw_only=True)
+class RandomActivationPerturbation(Perturbation):
+    """Random other activation (r-other)"""
+
+    model: HookedTransformer
+    dataset: Dataset
+    n_ctx: int
+    layer: str
+    pos: int
+
+    def generate(self, resid_acts):
+        target = get_random_activation(
+            model=self.model,
+            dataset=self.dataset,
+            n_ctx=self.n_ctx,
+            layer=self.layer,
+            pos=self.pos,
+        )
+        return target - resid_acts
+
+    @classmethod
+    def get_pert_by_fid(
+        cls,
+        fids: Iterable[FeatureId],
+        model: HookedTransformer,
+        dataset: Dataset,
+        n_ctx: int,
+        layer: str,
+        pos: int,
+    ) -> dict[FeatureId, "RandomActivationPerturbation"]:
+        pert = cls(model=model, dataset=dataset, n_ctx=n_ctx, layer=layer, pos=pos)
         return {fid: pert for fid in fids}
 
 

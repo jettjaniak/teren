@@ -77,3 +77,18 @@ def compute_loss(
     losses_flat = torch.cat(losses_list)
     loss_shape = batch_shape + (d_seq - 1,)
     return losses_flat.view(loss_shape)
+
+
+def generate_prompt(dataset, n_ctx: int = 1, batch: int = 1) -> torch.Tensor:
+    """Generate a prompt from the dataset."""
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch, shuffle=True)
+    return next(iter(dataloader))["input_ids"][:, :n_ctx]
+
+
+def get_random_activation(
+    model: HookedTransformer, dataset: Dataset, n_ctx: int, layer: str, pos
+) -> torch.Tensor:
+    """Get a random activation from the dataset."""
+    rand_prompt = generate_prompt(dataset, n_ctx=n_ctx)
+    _, cache = model.run_with_cache(rand_prompt)
+    return cache[layer][:, pos, :].to("cpu").detach()
