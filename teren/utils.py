@@ -77,3 +77,11 @@ def compute_loss(
     losses_flat = torch.cat(losses_list)
     loss_shape = batch_shape + (d_seq - 1,)
     return losses_flat.view(loss_shape)
+
+
+def compute_normalized_loss_increse(
+    loss: Float[torch.Tensor, "*batch seq"],
+    clean_loss: Float[torch.Tensor, "*batch seq"],
+    reference_loss: Float[torch.Tensor, "*batch seq"],
+) -> Float[torch.Tensor, "*batch seq"]:
+    return (loss - clean_loss) / reference_loss
