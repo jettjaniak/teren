@@ -5,6 +5,7 @@ import torch
 from sae_lens import SAE
 from transformer_lens import HookedTransformer
 
+from teren import utils
 from teren.perturbations import Perturbation
 from teren.typing import *
 
@@ -12,9 +13,9 @@ from teren.typing import *
 @dataclass
 class SAEFeatureExamples:
     fids: list[FeatureId]
-    input_ids: Int[torch.Tensor, "feature n_examples seq"]
-    resid_acts: Float[torch.Tensor, "feature n_examples seq model"]
-    clean_loss: Float[torch.Tensor, "feature n_examples seq"]
+    input_ids: Int[torch.Tensor, "feature example seq"]
+    resid_acts: Float[torch.Tensor, "feature example seq model"]
+    clean_loss: Float[torch.Tensor, "feature example seq"]
 
     @property
     def n_active_features(self):
@@ -25,7 +26,7 @@ class SAEFeatureExamples:
 
     def compute_pert_vectors(
         self, pert_by_fid: Mapping[FeatureId, Perturbation]
-    ) -> Float[torch.Tensor, "feature n_examples seq model"]:
+    ) -> Float[torch.Tensor, "feature example seq model"]:
         assert set(pert_by_fid.keys()) == set(self.fids)
         pert_vectors = torch.empty_like(self.resid_acts)
         for fid_idx, fid in enumerate(self.fids):
@@ -34,29 +35,91 @@ class SAEFeatureExamples:
             pert_vectors[fid_idx] = pert(feature_resid_acts)
         return pert_vectors
 
+    def compute_pert_vec_and_pert_norm(
+        self, pert_by_fid: Mapping[FeatureId, Perturbation]
+    ) -> tuple[
+        Float[torch.Tensor, "feature example seq model"],
+        Float[torch.Tensor, "feature example seq 1"],
+    ]:
+        pert_vec = self.compute_pert_vectors(pert_by_fid)
+        pert_norm = pert_vec.norm(p=2, dim=-1, keepdim=True)
+        assert pert_norm.isfinite().all()
+        return pert_vec, pert_norm
+
+    def compute_pert_norm_and_loss(
+        self,
+        pert_by_fid: Mapping[FeatureId, Perturbation],
+        model: HookedTransformer,
+        layer: int,
+        batch_size: int,
+    ) -> tuple[
+        Float[torch.Tensor, "feature example seq 1"],
+        Float[torch.Tensor, "feature example seq_m1"],
+    ]:
+        pert_vec, pert_norm = self.compute_pert_vec_and_pert_norm(pert_by_fid)
+        pert_resid_acts = self.resid_acts + pert_vec
+        loss_by_feature = utils.compute_loss(
+            model=model,
+            input_ids=self.input_ids,
+            resid_acts=pert_resid_acts,
+            start_at_layer=layer,
+            batch_size=batch_size,
+        )
+        return pert_norm, loss_by_feature
+
+    def compute_pert_loss(
+        self,
+        pert_by_fid: Mapping[FeatureId, Perturbation],
+        model: HookedTransformer,
+        layer: int,
+        target_pert_norm: Float[torch.Tensor, "feature example seq 1"],
+        batch_size: int,
+    ) -> Float[torch.Tensor, "feature example seq_m1"]:
+        """Apply perturbation with target norm, return perturbation loss"""
+        # TODO: for Stefan's repro have KL div option (and store logits, and maybe L2)
+        pert_vec, pert_norm = self.compute_pert_vec_and_pert_norm(pert_by_fid)
+        # Feature doubling perturbation is 0 if feature wasn't active,
+        # mask is used to avoid division by 0
+        pert_scale = torch.ones_like(target_pert_norm)
+        mask = pert_norm > 0
+        pert_scale[mask] = target_pert_norm[mask] / pert_norm[mask]
+        pert_resid_acts = self.resid_acts + pert_vec * pert_scale
+        loss = utils.compute_loss(
+            model=model,
+            input_ids=self.input_ids,
+            resid_acts=pert_resid_acts,
+            start_at_layer=layer,
+            batch_size=batch_size,
+        )
+        loss_isfinite = loss.isfinite()
+        assert (
+            loss_isfinite.all()
+        ), f"{loss_isfinite.sum().item()}/{loss.nelement()} loss elements finite"
+        return loss
+
 
 @dataclass
 class BatchSAEFeatureExamples:
-    input_ids: dict[FeatureId, Int[torch.Tensor, "_examples seq"]] = field(
+    input_ids: dict[FeatureId, Int[torch.Tensor, "examples seq"]] = field(
         default_factory=dict
     )
-    resid_acts: dict[FeatureId, Float[torch.Tensor, "_examples seq model"]] = field(
+    resid_acts: dict[FeatureId, Float[torch.Tensor, "examples seq model"]] = field(
         default_factory=dict
     )
-    clean_loss: dict[FeatureId, Float[torch.Tensor, "_examples seq_m1"]] = field(
+    clean_loss: dict[FeatureId, Float[torch.Tensor, "examples seq_m1"]] = field(
         default_factory=dict
     )
 
 
 @dataclass
 class ListsSAEFeatureExamples:
-    input_ids: Mapping[FeatureId, list[Int[torch.Tensor, "_examples seq"]]] = field(
+    input_ids: Mapping[FeatureId, list[Int[torch.Tensor, "examples seq"]]] = field(
         default_factory=lambda: defaultdict(list)
     )
-    resid_acts: Mapping[FeatureId, list[Float[torch.Tensor, "_examples seq model"]]] = (
+    resid_acts: Mapping[FeatureId, list[Float[torch.Tensor, "examples seq model"]]] = (
         field(default_factory=lambda: defaultdict(list))
     )
-    clean_loss: Mapping[FeatureId, list[Float[torch.Tensor, "_examples seq_m1"]]] = (
+    clean_loss: Mapping[FeatureId, list[Float[torch.Tensor, "examples seq_m1"]]] = (
         field(default_factory=lambda: defaultdict(list))
     )
 
