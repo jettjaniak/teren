@@ -97,6 +97,16 @@ class SAEFeatureExamples:
         ), f"{loss_isfinite.sum().item()}/{loss.nelement()} loss elements finite"
         return loss
 
+    def test_clean_loss(self, model: HookedTransformer, layer: int, batch_size: int):
+        loss = utils.compute_loss(
+            model=model,
+            input_ids=self.input_ids,
+            resid_acts=self.resid_acts,
+            start_at_layer=layer,
+            batch_size=batch_size,
+        )
+        assert torch.allclose(self.clean_loss, loss, rtol=1e-3, atol=1e-5)
+
 
 @dataclass
 class BatchSAEFeatureExamples:
@@ -191,7 +201,7 @@ def get_batch_sae_feature_examples(
     return ret
 
 
-def get_sae_feature_examples_by_layer_and_resid_mean_by_layer(
+def get_sae_feature_examples_by_layer_and_resid_stats_by_layer(
     input_ids: Int[torch.Tensor, "batch seq"],
     model: HookedTransformer,
     sae_by_layer: Mapping[int, SAE],
@@ -199,9 +209,7 @@ def get_sae_feature_examples_by_layer_and_resid_mean_by_layer(
     n_examples: int,
     batch_size: int,
     min_activation=0.0,
-) -> tuple[
-    Mapping[int, SAEFeatureExamples], Mapping[int, Float[torch.Tensor, "seq d_model"]]
-]:
+) -> tuple[Mapping[int, SAEFeatureExamples], Mapping[int, ResidStats]]:
     sae_examples_lists_by_feature_by_layer = {
         layer: ListsSAEFeatureExamples() for layer in sae_by_layer.keys()
     }
@@ -244,9 +252,12 @@ def get_sae_feature_examples_by_layer_and_resid_mean_by_layer(
         layer: sae_examples_lists_by_feature.filter_and_cat(n_examples)
         for layer, sae_examples_lists_by_feature in sae_examples_lists_by_feature_by_layer.items()
     }
-    resid_mean_by_layer = {
-        layer: resid_sum.cpu() / n_inputs
-        for layer, resid_sum in resid_sum_by_layer.items()
-    }
 
-    return examples_by_feature_by_layer, resid_mean_by_layer
+    resid_stats_by_layer = {}
+    for layer, resid_sum in resid_sum_by_layer.items():
+        resid_mean = (resid_sum / n_inputs).cpu()
+        # TODO
+        resid_cov = torch.zeros(resid_mean.shape + resid_mean.shape[-1:])
+        resid_stats_by_layer[layer] = ResidStats(mean=resid_mean, cov=resid_cov)
+
+    return examples_by_feature_by_layer, resid_stats_by_layer
