@@ -27,17 +27,24 @@ def get_pert_by_fid_by_name(
         # take the mean along feature and batch dimensions, keep sequence and d_model
         "ablate_resid": DampenResidActsPerturbation.get_pert_by_fid(fids, resid_mean),
         # ablate single SAE feature
-        # DampenSEAFeaturePerturbation w/o scaling
+        # DampenSAEFeaturePerturbation w/o scaling
         # results in setting a single feature to 0
         # every other perturbation is normalized to match the norm of this one
-        "ablate_sae_feature": DampenSEAFeaturePerturbation.get_pert_by_fid(fids, sae),
+        "ablate_sae_feature": DampenSAEFeaturePerturbation.get_pert_by_fid(fids, sae),
         # double a single SAE feature
-        # AmplifySEAFeaturePerturbation, norm is equal to feature ablation
-        "double_sae_feature": AmplifySEAFeaturePerturbation.get_pert_by_fid(fids, sae),
+        # AmplifySAEFeaturePerturbation, norm is equal to feature ablation
+        "double_sae_feature": AmplifySAEFeaturePerturbation.get_pert_by_fid(fids, sae),
         # move residual stream activations towards SAE reconstruction
         "toward_sae_recon": TowardSAEReconPerturbation.get_pert_by_fid(fids, sae),
         # move in a random direction
         "naive_random": NaiveRandomPerturbation.get_pert_by_fid(fids),
+        # perturb feature activations in a random direction
+        "naive_random_feature": NaiveRandomFeaturePerturbation.get_pert_by_fid(
+            fids, sae
+        ),
+        # dampen feature activations
+        # results in setting all features activations to 0
+        "dampen_feature_acts": DampenFeatureActsPerturbation.get_pert_by_fid(fids, sae),
     }
 
 
@@ -204,6 +211,8 @@ def plot_results_df(df: pd.DataFrame, seq_aggregation: str):
         "double_sae_feature": "#f18b00",
         "ablate_sae_feature": "#3282c0",
         "toward_sae_recon": "#df82cb",
+        "naive_random_feature": "#c53a32",
+        "dampen_feature_acts": "#8d69b8",
     }
 
     # Initialize the plot

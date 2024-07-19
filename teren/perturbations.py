@@ -50,6 +50,52 @@ class NaiveRandomPerturbation(Perturbation):
 
 
 @dataclass(kw_only=True)
+class FeaturesPerturbation(Perturbation):
+    """TODO"""
+
+    sae: SAE
+
+    def generate(self, resid_acts):
+        resid_acts_dev = resid_acts.to(self.sae.device)
+        feature_acts = self.sae.encode(resid_acts_dev)
+
+        return self.sae.decode(self.get_pert(feature_acts)).to(resid_acts.device)
+
+    @abstractmethod
+    def get_pert(
+        self, feature_acts: Float[torch.Tensor, "*batch seq sae"]
+    ) -> Float[torch.Tensor, "*batch seq sae"]:
+        raise NotImplementedError
+
+    @classmethod
+    def get_pert_by_fid(
+        cls, fids: Iterable[FeatureId], sae: SAE
+    ) -> Mapping[FeatureId, "FeaturesPerturbation"]:
+        pert = cls(sae=sae)
+        return {fid: pert for fid in fids}
+
+
+@dataclass(kw_only=True)
+class NaiveRandomFeaturePerturbation(FeaturesPerturbation):
+    """Isotropic random feature activation"""
+
+    def get_pert(
+        self, feature_acts: Float[torch.Tensor, "*batch seq sae"]
+    ) -> Float[torch.Tensor, "*batch seq sae"]:
+        return torch.randn_like(feature_acts)
+
+
+@dataclass(kw_only=True)
+class DampenFeatureActsPerturbation(FeaturesPerturbation):
+    """Scale all feature activations (Default - remove all feature activations)"""
+
+    def get_pert(
+        self, feature_acts: Float[torch.Tensor, "*batch seq sae"]
+    ) -> Float[torch.Tensor, "*batch seq sae"]:
+        return -feature_acts
+
+
+@dataclass(kw_only=True)
 class TowardSAEReconPerturbation(Perturbation):
     """Toward SAE reconstruction"""
 
@@ -95,7 +141,7 @@ class DampenResidActsPerturbation(AmplifyResidActsPerturbation):
 
 
 @dataclass(kw_only=True)
-class AmplifySEAFeaturePerturbation(Perturbation):
+class AmplifySAEFeaturePerturbation(Perturbation):
     sae: SAE
     fid: FeatureId
 
@@ -134,11 +180,11 @@ class AmplifySEAFeaturePerturbation(Perturbation):
     @classmethod
     def get_pert_by_fid(
         cls, fids: Iterable[FeatureId], sae: SAE
-    ) -> Mapping[FeatureId, "AmplifySEAFeaturePerturbation"]:
+    ) -> Mapping[FeatureId, "AmplifySAEFeaturePerturbation"]:
         return {fid: cls(sae=sae, fid=fid) for fid in fids}
 
 
 @dataclass(kw_only=True)
-class DampenSEAFeaturePerturbation(AmplifySEAFeaturePerturbation):
+class DampenSAEFeaturePerturbation(AmplifySAEFeaturePerturbation):
     def generate(self, resid_acts):
         return -super().generate(resid_acts)
