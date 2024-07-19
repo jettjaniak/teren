@@ -7,61 +7,46 @@ from sae_lens import SAE
 from transformer_lens import HookedTransformer
 
 from teren import utils
-from teren.perturbations import *
+from teren.perturbations import Perturbation, get_pert_by_fid_by_name
 from teren.sae_examples import SAEFeatureExamples
 from teren.typing import *
 
+PERT_NAME_MAP = {
+    "ablate_resid": "dampen_resid_acts",
+    "ablate_sae_feature": "dampen_feature",
+    "double_feature": "amplify_feature",
+    "toward_sae_recon": "toward_sae_recon",
+    "naive_random": "naive_random_resid_acts",
+    "naive_random_features": "naive_random_feature_acts",
+    "dampen_features": "dampen_features",
+}
 
-def get_pert_by_fid_by_name(
-    fids: list[FeatureId], sae: SAE, resid_mean: Float[torch.Tensor, "seq model"]
-) -> Mapping[str, Mapping[FeatureId, Perturbation]]:
-    """For every perturbation name, return a dictionary of perturbations by feature id
-
-    Perturbation names correspond to a plot labels. Not every perturbation depends on feature id,
-    in which case every feature id is mapped to the same perturbation object.
-    """
-    return {
-        # dampen_resid_acts_perturbation w/o scaling
-        # results in setting residual stream to 0
-        # used as reference, to get a relative scale for plots
-        # take the mean along feature and batch dimensions, keep sequence and d_model
-        "ablate_resid": DampenResidActsPerturbation.get_pert_by_fid(fids, resid_mean),
-        # ablate single SAE feature
-        # DampenSAEFeaturePerturbation w/o scaling
-        # results in setting a single feature to 0
-        # every other perturbation is normalized to match the norm of this one
-        "ablate_sae_feature": DampenSAEFeaturePerturbation.get_pert_by_fid(fids, sae),
-        # double a single SAE feature
-        # AmplifySAEFeaturePerturbation, norm is equal to feature ablation
-        "double_sae_feature": AmplifySAEFeaturePerturbation.get_pert_by_fid(fids, sae),
-        # move residual stream activations towards SAE reconstruction
-        "toward_sae_recon": TowardSAEReconPerturbation.get_pert_by_fid(fids, sae),
-        # move in a random direction
-        "naive_random": NaiveRandomPerturbation.get_pert_by_fid(fids),
-        # perturb feature activations in a random direction
-        "naive_random_feature": NaiveRandomFeaturePerturbation.get_pert_by_fid(
-            fids, sae
-        ),
-        # dampen feature activations
-        # results in setting all features activations to 0
-        "dampen_feature_acts": DampenFeatureActsPerturbation.get_pert_by_fid(fids, sae),
-    }
+COLOR_MAP = {
+    "ablate_sae_feature": "#3282c0",
+    "double_feature": "#f18b00",
+    "toward_sae_recon": "#df82cb",
+    "naive_random": "#51aa19",
+    "naive_random_features": "#c53a32",
+    "dampen_features": "#8d69b8",
+}
 
 
 def get_pert_by_fid_by_name_by_layer(
     sae_feature_examples_by_layer: Mapping[int, SAEFeatureExamples],
     sae_by_layer: Mapping[int, SAE],
-    resid_mean_by_layer: Mapping[int, Float[torch.Tensor, "seq model"]],
+    resid_stats_by_layer: Mapping[int, ResidStats],
 ) -> Mapping[int, Mapping[str, Mapping[FeatureId, Perturbation]]]:
     """Do get_pert_by_fid_by_name() for all layers"""
     pert_by_fid_by_name_by_layer = {}
     for layer, sae_feature_examples in sae_feature_examples_by_layer.items():
         sae = sae_by_layer[layer]
-        resid_mean = resid_mean_by_layer[layer]
+        resid_stats = resid_stats_by_layer[layer]
         fids = sae_feature_examples.fids
-        pert_by_fid_by_name_by_layer[layer] = get_pert_by_fid_by_name(
-            fids, sae, resid_mean
-        )
+        all_pert_by_fid_by_name = get_pert_by_fid_by_name(fids, sae, resid_stats)
+        pert_by_fid_by_name_by_layer[layer] = {
+            pert_name: all_pert_by_fid_by_name[orig_pert_name]
+            for pert_name, orig_pert_name in PERT_NAME_MAP.items()
+        }
     return pert_by_fid_by_name_by_layer
 
 
@@ -205,16 +190,6 @@ def compute_results_df(
 
 
 def plot_results_df(df: pd.DataFrame, seq_aggregation: str):
-    # Define the color map
-    color_map = {
-        "naive_random": "#51aa19",
-        "double_sae_feature": "#f18b00",
-        "ablate_sae_feature": "#3282c0",
-        "toward_sae_recon": "#df82cb",
-        "naive_random_feature": "#c53a32",
-        "dampen_feature_acts": "#8d69b8",
-    }
-
     # Initialize the plot
     layers = df["layer"].unique()
     n_layers = len(layers)
@@ -230,7 +205,7 @@ def plot_results_df(df: pd.DataFrame, seq_aggregation: str):
         row = i // cols
         ax = axes[row][col]  # type: ignore
         layer_df = df[df["layer"] == layer]
-        color = [color_map[name] for name in layer_df["pert_name"]]
+        color = [COLOR_MAP[name] for name in layer_df["pert_name"]]
         ax.bar(
             layer_df["pert_name"],
             layer_df[f"loss_seq_{seq_aggregation}_mean"],
@@ -249,21 +224,3 @@ def plot_results_df(df: pd.DataFrame, seq_aggregation: str):
     plt.tight_layout()
     plt.subplots_adjust(left=0.32)  # Adjusted to make room for the legend
     plt.show()
-
-
-def test_clean_loss_correct(
-    model: HookedTransformer,
-    sae_feature_examples_by_layer: Mapping[int, SAEFeatureExamples],
-    batch_size: int,
-):
-    for layer, sae_feature_examples in sae_feature_examples_by_layer.items():
-        loss_by_feature = utils.compute_loss(
-            model=model,
-            input_ids=sae_feature_examples.input_ids,
-            resid_acts=sae_feature_examples.resid_acts,
-            start_at_layer=layer,
-            batch_size=batch_size,
-        )
-        assert torch.allclose(
-            sae_feature_examples.clean_loss, loss_by_feature, rtol=1e-3, atol=1e-5
-        )

@@ -1,5 +1,7 @@
+import random
 from typing import cast
 
+import numpy as np
 import torch
 from datasets import Dataset, load_dataset
 from jaxtyping import Float, Int
@@ -85,3 +87,11 @@ def compute_normalized_loss_increse(
     reference_loss: Float[torch.Tensor, "*batch seq"],
 ) -> Float[torch.Tensor, "*batch seq"]:
     return (loss - clean_loss) / reference_loss
+
+
+def setup_determinism(seed: int):
+    torch.use_deterministic_algorithms(True)
+    torch.backends.cudnn.benchmark = False
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
