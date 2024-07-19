@@ -210,7 +210,7 @@ def plot_results_df(df: pd.DataFrame, seq_aggregation: str):
     layers = df["layer"].unique()
     n_layers = len(layers)
     rows = 3
-    cols = math.ceil(n_layers / rows)
+    cols = max(2, math.ceil(n_layers / rows))
     width = cols * len(df["pert_name"].unique()) / 2
     height = rows * 2
     fig, axes = plt.subplots(rows, cols, figsize=(width, height), sharey=False)
