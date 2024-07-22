@@ -97,6 +97,36 @@ class SAEFeatureExamples:
         ), f"{loss_isfinite.sum().item()}/{loss.nelement()} loss elements finite"
         return loss
 
+    def compute_pert_loss_scaled(
+        self,
+        pert_by_fid: Mapping[FeatureId, Perturbation],
+        model: HookedTransformer,
+        layer: int,
+        scale_factor: float,
+        batch_size: int,
+    ) -> Float[torch.Tensor, "feature example seq_m1"]:
+        """Apply perturbation with target norm, return perturbation loss"""
+        # TODO: for Stefan's repro have KL div option (and store logits, and maybe L2)
+        pert_vec, pert_norm = self.compute_pert_vec_and_pert_norm(pert_by_fid)
+        # Feature doubling perturbation is 0 if feature wasn't active,
+        # mask is used to avoid division by 0
+        pert_scale = torch.ones_like(target_pert_norm)
+        mask = pert_norm > 0
+        pert_scale[mask] = target_pert_norm[mask] / pert_norm[mask]
+        pert_resid_acts = self.resid_acts + pert_vec * pert_scale
+        loss = utils.compute_loss(
+            model=model,
+            input_ids=self.input_ids,
+            resid_acts=pert_resid_acts,
+            start_at_layer=layer,
+            batch_size=batch_size,
+        )
+        loss_isfinite = loss.isfinite()
+        assert (
+            loss_isfinite.all()
+        ), f"{loss_isfinite.sum().item()}/{loss.nelement()} loss elements finite"
+        return loss
+
     def test_clean_loss(self, model: HookedTransformer, layer: int, batch_size: int):
         loss = utils.compute_loss(
             model=model,

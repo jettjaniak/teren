@@ -9,6 +9,10 @@ from transformer_lens import HookedTransformer
 from transformer_lens import utils as tl_utils
 from transformers import PreTrainedTokenizerBase
 
+from teren.perturbations import Perturbation
+from teren.sae_examples import SAEFeatureExamples
+from teren.typing import *
+
 
 def get_device_str() -> str:
     if torch.backends.mps.is_available():
@@ -95,3 +99,36 @@ def setup_determinism(seed: int):
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
+
+
+def compute_loss_by_pert_normalized(
+    sae_feature_examples: SAEFeatureExamples,
+    pert_by_fid_by_name: Mapping[str, Mapping[FeatureId, Perturbation]],
+    model: HookedTransformer,
+    layer: int,
+    batch_size: int,
+    scale_factor: float,
+):
+    """Compute losses for all perturbations for a single SAE
+
+    Perturbations are normalized to match the norm of the ablate_sae_feature perturbation.
+    """
+    target_pert_norm, ablate_sae_feature_loss = (
+        sae_feature_examples.compute_pert_norm_and_loss(
+            pert_by_fid=pert_by_fid_by_name["ablate_sae_feature"],
+            model=model,
+            layer=layer,
+            batch_size=batch_size,
+        )
+    )
+    loss_by_pert = {"ablate_sae_feature": ablate_sae_feature_loss}
+
+    for pert_name, pert_by_fid in pert_by_fid_by_name.items():
+        loss_by_pert[pert_name] = sae_feature_examples.compute_pert_loss(
+            pert_by_fid=pert_by_fid,
+            model=model,
+            layer=layer,
+            scale_factor=scale_factor,
+            batch_size=batch_size,
+        )
+    return loss_by_pert

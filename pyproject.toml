@@ -25,6 +25,7 @@ dependencies = [
     "tqdm==4.66.4",
     "transformer-lens @ git+https://github.com/jettjaniak/TransformerLens.git@beartype-optional",
     "transformers==4.42.3",
+    "dacite==1.8.1",
 ]
 
 [build-system]
