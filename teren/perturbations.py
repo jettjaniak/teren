@@ -124,6 +124,42 @@ class SAEFeaturePerturbation(Perturbation):
 
 
 @dataclass
+class TestPerturbation(Perturbation):
+    def __init__(self, base_ref: Reference, chosen_feature, sae, negate=-1):
+        self.base_ref = base_ref
+        self.sae = sae
+        self.negate = negate
+        self.feature_idx, self.feature_act = chosen_feature
+
+    def generate(self, resid_acts):
+
+        single_dir = (
+            self.negate * self.sae.W_dec[self.feature_idx, :].to("cpu").detach()
+        )
+
+        if isinstance(self.base_ref.perturbation_pos, slice):
+            dir = torch.stack(
+                [single_dir for _ in range(self.base_ref.act.shape[0])]
+            ).unsqueeze(0)
+        else:
+            dir = single_dir.unsqueeze(0)
+
+        scale = self.feature_act
+
+        pert_scale = torch.linalg.vector_norm(
+            resid_acts, dim=-1, keepdim=True
+        ) / torch.linalg.vector_norm((dir * scale), dim=-1, keepdim=True)
+
+        """
+        if pert_scale > self.feature_act:
+            return torch.zeros_like(dir)
+        else:
+            return dir * scale
+        """
+        return dir * scale
+
+
+@dataclass
 class TowardSAEReconPerturbation(Perturbation):
     """Toward SAE reconstruction"""
 
@@ -185,14 +221,26 @@ def scan(
 ) -> Float[torch.Tensor, "... n_steps 1 d_model"]:
     direction = perturbation(activations)
 
-    direction -= torch.mean(direction, dim=-1, keepdim=True)
-    direction *= torch.linalg.vector_norm(
-        activations, dim=-1, keepdim=True
-    ) / torch.linalg.vector_norm(direction, dim=-1, keepdim=True)
+    if isinstance(perturbation, TestPerturbation):
+        f_act = torch.linalg.vector_norm(direction, dim=-1)
 
-    perturbed_steps = [
-        activations + alpha * direction for alpha in torch.linspace(*range, n_steps)
-    ]
+    direction -= torch.mean(direction, dim=-1, keepdim=True)
+    if torch.linalg.vector_norm(direction, dim=-1).item() != 0.0:
+        direction *= torch.linalg.vector_norm(
+            activations, dim=-1, keepdim=True
+        ) / torch.linalg.vector_norm(direction, dim=-1, keepdim=True)
+
+    if isinstance(perturbation, TestPerturbation):
+        perturbed_steps = []
+        for alpha in torch.linspace(*range, n_steps):
+            if torch.linalg.vector_norm((alpha * direction), dim=-1) > f_act:
+                perturbed_steps.append(activations)
+                continue
+            perturbed_steps.append(activations + alpha * direction)
+    else:
+        perturbed_steps = [
+            activations + alpha * direction for alpha in torch.linspace(*range, n_steps)
+        ]
     perturbed_activations = torch.cat(perturbed_steps, dim=0)
     return perturbed_activations
 
