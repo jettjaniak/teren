@@ -100,6 +100,30 @@ class SAEDecoderDirectionPerturbation(Perturbation):
 
 
 @dataclass
+class SAEFeaturePerturbation(Perturbation):
+    def __init__(self, base_ref: Reference, chosen_feature, sae, negate=-1):
+        self.base_ref = base_ref
+        self.sae = sae
+        self.negate = negate
+        self.feature_idx, self.feature_act = chosen_feature
+
+    def generate(self, resid_acts):
+        single_dir = (
+            self.negate * self.sae.W_dec[self.feature_idx, :].to("cpu").detach()
+        )
+
+        if isinstance(self.base_ref.perturbation_pos, slice):
+            dir = torch.stack(
+                [single_dir for _ in range(self.base_ref.act.shape[0])]
+            ).unsqueeze(0)
+        else:
+            dir = single_dir.unsqueeze(0)
+
+        scale = self.feature_act
+        return dir * scale
+
+
+@dataclass
 class TowardSAEReconPerturbation(Perturbation):
     """Toward SAE reconstruction"""
 
