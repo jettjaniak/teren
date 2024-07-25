@@ -51,19 +51,29 @@ class RandomPerturbation(Perturbation):
 class RandomActivationPerturbation(Perturbation):
     """Random activation direction"""
 
-    def __init__(self, base_ref, dataset):
+    def __init__(self, base_ref, target, dataset):
         self.base_ref = base_ref
         self.dataset = dataset
+        self.target = target
 
     def generate(self, resid_acts):
-        target = get_random_activation(
-            self.base_ref.model,
-            self.dataset,
-            self.base_ref.n_ctx,
-            self.base_ref.perturbation_layer,
-            self.base_ref.perturbation_pos,
+        return self.target - resid_acts
+
+
+@dataclass
+class SAEActivationPerturbation(Perturbation):
+    """Random activation direction"""
+
+    def __init__(self, base_ref, target, dataset, sae):
+        self.base_ref = base_ref
+        self.dataset = dataset
+        self.target = target
+        self.sae = sae
+
+    def generate(self, resid_acts):
+        return self.sae.decode(self.sae.encode(self.target)) - self.sae.decode(
+            self.sae.encode(resid_acts)
         )
-        return target - resid_acts
 
 
 @dataclass
@@ -120,7 +130,7 @@ class SAEFeaturePerturbation(Perturbation):
             dir = single_dir.unsqueeze(0)
 
         scale = self.feature_act
-        return dir * scale
+        return dir  # * scale
 
 
 @dataclass
