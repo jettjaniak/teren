@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from random import choice
+from random import choice, sample
 from typing import final
 
 import numpy as np
@@ -62,7 +62,7 @@ class RandomActivationPerturbation(Perturbation):
 
 @dataclass
 class SAEActivationPerturbation(Perturbation):
-    """Random activation direction"""
+    """SAE(Random activation) direction"""
 
     def __init__(self, base_ref, target, dataset, sae):
         self.base_ref = base_ref
@@ -72,6 +72,40 @@ class SAEActivationPerturbation(Perturbation):
 
     def generate(self, resid_acts):
         return self.sae.decode(self.sae.encode(self.target)) - self.sae.decode(
+            self.sae.encode(resid_acts)
+        )
+
+
+@dataclass
+class SyntheticActivationPerturbation(Perturbation):
+    """Towards activation made up of random SAE features"""
+
+    def __init__(self, base_ref, thresh, dataset, sae):
+        self.base_ref = base_ref
+        self.dataset = dataset
+        self.thresh = thresh
+        self.sae = sae
+        self.feature_acts = sae.encode(base_ref.cache[sae.cfg.hook_name])[0, -1, :]
+        self.active_features = {
+            f_idx: self.feature_acts[f_idx]
+            for f_idx in range(self.sae.W_dec.shape[0])
+            if self.feature_acts[f_idx] / self.feature_acts.max() > self.thresh
+        }
+
+    def generate(self, resid_acts):
+        target_feature_acts = torch.zeros_like(self.feature_acts)
+        target_f_idxs = sample(
+            [
+                f_idx
+                for f_idx in range(self.sae.W_dec.shape[0])
+                if f_idx not in self.active_features.keys()
+            ],
+            len(self.active_features.keys()),
+        )
+        for i, f_act in enumerate(self.active_features.values()):
+            target_feature_acts[target_f_idxs[i]] = f_act
+
+        return self.sae.decode(target_feature_acts) - self.sae.decode(
             self.sae.encode(resid_acts)
         )
 
@@ -228,6 +262,7 @@ def scan(
     activations: Float[torch.Tensor, "... n_ctx d_model"],
     n_steps: int,
     range: tuple[float, float],
+    reduce: bool,
 ) -> Float[torch.Tensor, "... n_steps 1 d_model"]:
     direction = perturbation(activations)
 
@@ -235,12 +270,19 @@ def scan(
         f_act = torch.linalg.vector_norm(direction, dim=-1)
 
     direction -= torch.mean(direction, dim=-1, keepdim=True)
-    if torch.linalg.vector_norm(direction, dim=-1).item() != 0.0:
+    print(torch.mean(direction, dim=-1, keepdim=True))
+    if (torch.linalg.vector_norm(direction, dim=-1).item() != 0.0) and (not reduce):
+        print("Normalizing direction")
         direction *= torch.linalg.vector_norm(
             activations, dim=-1, keepdim=True
         ) / torch.linalg.vector_norm(direction, dim=-1, keepdim=True)
 
-    if isinstance(perturbation, TestPerturbation):
+    if reduce:
+        perturbed_steps = [
+            ((1 - alpha) * activations) + (alpha * direction)
+            for alpha in torch.linspace(*range, n_steps)
+        ]
+    elif isinstance(perturbation, TestPerturbation):
         perturbed_steps = []
         for alpha in torch.linspace(*range, n_steps):
             if torch.linalg.vector_norm((alpha * direction), dim=-1) > f_act:
@@ -256,12 +298,16 @@ def scan(
 
 
 def run_perturbation(
-    cfg: ExperimentConfig, base_ref: Reference, perturbation: Perturbation
+    cfg: ExperimentConfig,
+    base_ref: Reference,
+    perturbation: Perturbation,
+    reduce: bool = False,
 ):
     perturbed_activations = scan(
         perturbation=perturbation,
         activations=base_ref.act,
         n_steps=cfg.n_steps,
+        reduce=reduce,
         range=cfg.perturbation_range,
     )
     kl_div = compare(base_ref, perturbed_activations)
