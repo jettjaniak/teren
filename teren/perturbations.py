@@ -77,6 +77,7 @@ class SAEActivationPerturbation(Perturbation):
         print(
             f"Target Recon Error: {(self.sae.decode(self.sae.encode(self.target)) - self.target).abs().sum()}"
         )
+
         return self.sae.decode(self.sae.encode(self.target)) - self.sae.decode(
             self.sae.encode(resid_acts)
         )
@@ -153,19 +154,26 @@ class SAEDecoderDirectionPerturbation(Perturbation):
 class OtherFeaturePerturbation(Perturbation):
     """SAE(Random activation) direction"""
 
-    def __init__(self, base_ref, target, f_idx, dataset, sae):
+    def __init__(self, base_ref, base_feature, target_f_act, dataset, sae):
         self.base_ref = base_ref
         self.dataset = dataset
-        self.target = target
-        self.f_idx = f_idx
+        self.base_f_idx, self.base_f_act = base_feature
+        self.target_f_act = target_f_act
         self.sae = sae
 
     def generate(self, resid_acts):
+        single_dir = self.sae.W_dec[self.base_f_idx] * (
+            self.target_f_act.item() - self.base_f_act.item()
+        )
 
-        base_f_act = self.sae.encode(resid_acts)[self.f_idx]
-        target_f_act = self.sae.encode(self.target)[self.f_idx]
+        if isinstance(self.base_ref.perturbation_pos, slice):
+            dir = torch.stack(
+                [single_dir for _ in range(self.base_ref.act.shape[0])]
+            ).unsqueeze(0)
+        else:
+            dir = single_dir.unsqueeze(0)
 
-        return self.sae.W_dec[self.f_idx] * (target_f_act - base_f_act)
+        return dir
 
 
 @dataclass
