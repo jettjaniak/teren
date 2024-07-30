@@ -71,6 +71,12 @@ class SAEActivationPerturbation(Perturbation):
         self.sae = sae
 
     def generate(self, resid_acts):
+        print(
+            f"Base Recon Error: {(self.sae.decode(self.sae.encode(resid_acts)) - resid_acts).abs().sum()}"
+        )
+        print(
+            f"Target Recon Error: {(self.sae.decode(self.sae.encode(self.target)) - self.target).abs().sum()}"
+        )
         return self.sae.decode(self.sae.encode(self.target)) - self.sae.decode(
             self.sae.encode(resid_acts)
         )
@@ -164,7 +170,7 @@ class SAEFeaturePerturbation(Perturbation):
             dir = single_dir.unsqueeze(0)
 
         scale = self.feature_act
-        return dir  # * scale
+        return dir * scale
 
 
 @dataclass
@@ -270,19 +276,13 @@ def scan(
         f_act = torch.linalg.vector_norm(direction, dim=-1)
 
     direction -= torch.mean(direction, dim=-1, keepdim=True)
-    print(torch.mean(direction, dim=-1, keepdim=True))
     if (torch.linalg.vector_norm(direction, dim=-1).item() != 0.0) and (not reduce):
         print("Normalizing direction")
         direction *= torch.linalg.vector_norm(
             activations, dim=-1, keepdim=True
         ) / torch.linalg.vector_norm(direction, dim=-1, keepdim=True)
 
-    if reduce:
-        perturbed_steps = [
-            ((1 - alpha) * activations) + (alpha * direction)
-            for alpha in torch.linspace(*range, n_steps)
-        ]
-    elif isinstance(perturbation, TestPerturbation):
+    if isinstance(perturbation, TestPerturbation):
         perturbed_steps = []
         for alpha in torch.linspace(*range, n_steps):
             if torch.linalg.vector_norm((alpha * direction), dim=-1) > f_act:
