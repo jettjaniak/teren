@@ -150,6 +150,25 @@ class SAEDecoderDirectionPerturbation(Perturbation):
 
 
 @dataclass
+class OtherFeaturePerturbation(Perturbation):
+    """SAE(Random activation) direction"""
+
+    def __init__(self, base_ref, target, f_idx, dataset, sae):
+        self.base_ref = base_ref
+        self.dataset = dataset
+        self.target = target
+        self.f_idx = f_idx
+        self.sae = sae
+
+    def generate(self, resid_acts):
+
+        base_f_act = self.sae.encode(resid_acts)[self.f_idx]
+        target_f_act = self.sae.encode(self.target)[self.f_idx]
+
+        return self.sae.W_dec[self.f_idx] * (target_f_act - base_f_act)
+
+
+@dataclass
 class SAEFeaturePerturbation(Perturbation):
     def __init__(self, base_ref: Reference, chosen_feature, sae, negate=-1):
         self.base_ref = base_ref
