@@ -22,7 +22,7 @@ from transformer_lens import HookedTransformer
 n_ctx = 10
 perturbation_layer_number = 1
 perturbation_layer = f"blocks.{perturbation_layer_number}.hook_resid_pre"
-seed = 3123
+seed = 6
 dataloader_batch_size = 15
 perturbation_pos = slice(-1, None, 1)
 read_layer = "blocks.11.hook_resid_post"
@@ -31,12 +31,14 @@ n_steps = 200
 mean_batch_size = 300
 sae_threshold = 0.05  # 0.05
 
-NORMALIZE = False
+NORMALIZE = True
+MEAN_NORMALIZE = False
+ADDITIVE_PERTURBATION = True
 
 R_OTHER = False
 RANDOM = False
-PREDEFINED_OTHER = True
-ACTIVATE_SAE_FEATURE = False
+PREDEFINED_OTHER = False
+ACTIVATE_SAE_FEATURE = True
 
 SAE_RELU = True
 
@@ -68,6 +70,7 @@ target_ids = {key: [] for key in keys}
 
 perturbations_only_max_values = {key: [] for key in keys}
 
+perturbations_cache = {key: [] for key in keys}
 r_other_act = []
 # tensor([[3513,  553,  262, 8009,  531,   13,  198,  198, 1858,  547]]) base_ref.prompt, seed = 6
 ###############################################
@@ -193,7 +196,10 @@ class RandomPerturbation(Perturbation):
 
     def generate(self, resid_acts):
         target = self.distrib.sample(resid_acts.shape[:-1])
-        return target - resid_acts
+        if ADDITIVE_PERTURBATION:
+            return target
+        else:
+            return target - resid_acts
 
 
 class RandomActivationPerturbation(Perturbation):
@@ -212,7 +218,10 @@ class RandomActivationPerturbation(Perturbation):
             self.base_ref.perturbation_layer,
             self.base_ref.perturbation_pos,
         )
-        return target - resid_acts
+        if ADDITIVE_PERTURBATION:
+            return target
+        else:
+            return target - resid_acts
 
 
 class PredefinedActivationPerturbation(Perturbation):
@@ -226,25 +235,22 @@ class PredefinedActivationPerturbation(Perturbation):
         self.key = predefined_other_key
 
     def generate(self, resid_acts):
-        if self.count < len(self.predefined_prompts):
-            target = get_predefined_activation(
-                self.base_ref.model,
-                self.dataset,
-                self.base_ref.n_ctx,
-                self.base_ref.perturbation_layer,
-                self.base_ref.perturbation_pos,
-                self.predefined_prompts[self.count],
-            )
-            self.count += 1
+        if self.count >= len(self.predefined_prompts):
+            raise ValueError("No more predefined prompts to perturb to")
+        target = get_predefined_activation(
+            self.base_ref.model,
+            self.dataset,
+            self.base_ref.n_ctx,
+            self.base_ref.perturbation_layer,
+            self.base_ref.perturbation_pos,
+            self.predefined_prompts[self.count],
+        )
+        self.count += 1
+
+        if ADDITIVE_PERTURBATION:
+            return target
         else:
-            target = get_random_activation(
-                self.base_ref.model,
-                self.dataset,
-                self.base_ref.n_ctx,
-                self.base_ref.perturbation_layer,
-                self.base_ref.perturbation_pos,
-            )
-        return target - resid_acts
+            return target - resid_acts
 
 
 class ActivateSAEFeaturePerturbation(Perturbation):
@@ -260,7 +266,13 @@ class ActivateSAEFeaturePerturbation(Perturbation):
             raise ValueError("No more targets to perturb to")
         target = self.targets[self.count]
         self.count += 1
-        return target - resid_acts
+        # print(f"Target shape: {target.shape}")
+        # print(f"resid_acts shape: {resid_acts.shape}")
+        # print(f"target - resid_acts shape: {(target - resid_acts).shape}")
+        if ADDITIVE_PERTURBATION:
+            return target.unsqueeze(0).unsqueeze(0)
+        else:
+            return target - resid_acts
 
 
 ###############################################
@@ -312,7 +324,8 @@ def scan(
     direction = perturbation(activations)
 
     if NORMALIZE:
-        direction -= torch.mean(direction, dim=-1, keepdim=True)
+        if MEAN_NORMALIZE:
+            direction -= torch.mean(direction, dim=-1, keepdim=True)
         direction *= torch.linalg.vector_norm(
             activations, dim=-1, keepdim=True
         ) / torch.linalg.vector_norm(direction, dim=-1, keepdim=True)
@@ -321,9 +334,6 @@ def scan(
         activations + alpha * direction for alpha in torch.linspace(*range, n_steps)
     ]
     perturbed_activations = torch.cat(perturbed_steps, dim=0)
-    perturbations_only = [
-        alpha * direction for alpha in torch.linspace(*range, n_steps)
-    ]
 
     if not NORMALIZE:
         temp_dir = perturbed_steps[-1] - direction
@@ -334,6 +344,9 @@ def scan(
         assert similarity > 0.999, f"Similarity is {similarity}"
 
     if sae is not None:
+        perturbations_only = [
+            alpha * direction for alpha in torch.linspace(*range, n_steps)
+        ]
         global base_acted, base_strs, base_ids
         global pert_acted, pert_strs, pert_all_act, pert_ids, perturbed_max_values
         global target_all_act, target_ids
@@ -374,6 +387,8 @@ def scan(
         perturbations_only_max_values[dict_key].append(
             perturbations_only_max_values_ret
         )
+    global perturbations_cache
+    perturbations_cache[perturbation.key].append(perturbed_activations)
 
     return perturbed_activations
 
@@ -510,12 +525,20 @@ if RANDOM or PREDEFINED_OTHER:
         data_cov = nearest_positive_definite(data_cov)
 
 # %%
+sae = get_gpt2_res_jb_saes(perturbation_layer)[0][perturbation_layer].to("cpu")
+
+
+if not SAE_RELU:
+    sae.turn_off_activation()
+
+
+# %%
 if PREDEFINED_OTHER:
     r_others_similarities = []
+    A_origin = base_ref.act.squeeze(0).squeeze(0) - sae.b_dec
     for t in data:
-        r_others_similarities.append(
-            cosine_similarity(base_ref.act.squeeze(0).squeeze(0), t)
-        )
+        t_origin = t - sae.b_dec
+        r_others_similarities.append(cosine_similarity(A_origin, t_origin))
     sorted_indices = np.argsort(r_others_similarities)[::-1]
     sorted_indices = sorted_indices.copy()
     ret_indices = np.concatenate(
@@ -529,12 +552,6 @@ if PREDEFINED_OTHER:
     )
     predefined_other_prompts = batch_of_prompts[ret_indices]
     chosen_similarities = [r_others_similarities[i] for i in ret_indices]
-# %%
-sae = get_gpt2_res_jb_saes(perturbation_layer)[0][perturbation_layer].to("cpu")
-
-
-if not SAE_RELU:
-    sae.turn_off_activation()
 
 
 # %%
@@ -574,8 +591,8 @@ if ACTIVATE_SAE_FEATURE:
     recon_norm = []
     recon_batch_size = 2000
     selection = "singles"
-    choose_mid = True
-    choose_bad = True
+    choose_mid = False
+    choose_bad = False
 
     for start_idx in tqdm(range(0, sae_zero.shape[0], recon_batch_size)):
         end_idx = min(start_idx + recon_batch_size, sae_zero.shape[0])
@@ -595,9 +612,9 @@ if ACTIVATE_SAE_FEATURE:
         # Compute norms and cosine similarities for the batch
         for f_recon in f_recon_batch:
             recon_norm.append(torch.norm(f_recon))
-            recon_sim.append(cosine_similarity(A, f_recon))
+            recon_sim.append(cosine_similarity(A - sae.b_dec, f_recon - sae.b_dec))
 
-    num_chosen = 5
+    num_chosen = 10
     upper_threshold_for_bullshit = 2
 
     # recon_chosen_indices = recon_sorted_indices[:num_chosen] # previous code, DON'T DELETE
@@ -641,7 +658,7 @@ if ACTIVATE_SAE_FEATURE:
     recon_chosen_act = []
     for index in recon_chosen_indices:
         sae_zero[index] = A_encoded_norm
-        recon_chosen_act.append(sae.decode(sae_zero))
+        recon_chosen_act.append(sae.decode(sae_zero) - sae.b_dec)
         sae_zero[index] = 0
     recon_chosen_sim = [recon_sim[index] for index in recon_chosen_indices]
     recon_chosen_norm = [recon_norm[index] for index in recon_chosen_indices]
@@ -767,7 +784,7 @@ elif ACTIVATE_SAE_FEATURE:
 # for _ in tqdm(range(len(ret_indices))):
 for _ in tqdm(range(loop_len)):
     for name, perturbation in perturbations.items():
-        kl_div = run_perturbation(base_ref, perturbation)
+        kl_div = run_perturbation(base_ref, perturbation, sae)
         results[name].append(kl_div)
 
 
@@ -824,16 +841,16 @@ def plot_max_values(max_values, perturbations_only_max_values):
 
 
 # %%
-def plot_activation_evolution(feature_ids, all_activations):
+def plot_activation_evolution(feature_ids, all_activations, cur_id):
     selected_activations = [tensor[feature_ids] for tensor in all_activations]
     # Step 1: Stack the tensors
     stacked_tensors = torch.stack(selected_activations, dim=0)
-    reaching_point = calculate_step_of_A_to_T(base_ref.act, r_other_act[cur_id])
-    stacked_tensors = stacked_tensors[:reaching_point]
+    # reaching_point = calculate_step_of_A_to_T(base_ref.act, r_other_act[cur_id])
+    # stacked_tensors = stacked_tensors[:reaching_point]
     # Step 2 and 3: Transpose and unbind for each dimension
     transposed_tensors = stacked_tensors.transpose(0, 1)
     for i, act in enumerate(transposed_tensors):
-        plt.plot(act.squeeze(0).squeeze(0), label=f"Feature {feature_ids[0][i]}")
+        plt.plot(act.squeeze(0).squeeze(0), label=f"Feature {feature_ids[i]}")
     plt.legend()
     plt.show()
 
@@ -866,14 +883,14 @@ def get_explanation(
 ###################
 
 
-def heatmap_activation_evolution(feature_ids, activations):
+def heatmap_activation_evolution(feature_ids, activations, cur_id):
     selected_activations = [tensor[feature_ids] for tensor in activations]
     # Stack the selected activations into a 2D array
     stacked_tensors = torch.stack(selected_activations, dim=0)
     transposed_tensors = stacked_tensors.transpose(0, 1)
     # Plot the heatmap
     ylabels = [
-        get_explanation(perturbation_layer_number, feature_id)
+        f"{get_explanation(perturbation_layer_number, feature_id)} {feature_id}"
         for feature_id in feature_ids
     ]
     ylabels = [label if label is not None else "" for label in ylabels]
@@ -960,7 +977,7 @@ def plot_activate_sae_features(results):
                 # Only label the first line for each perturb_name
                 plt.plot(
                     data,
-                    color=color_list[i],
+                    # color=color_list[i],
                     label=f"{recon_chosen_sim[i]:.2f}, {recon_chosen_indices[i]}",
                     linewidth=0.5,
                 )
@@ -969,10 +986,10 @@ def plot_activate_sae_features(results):
                 plt.plot(
                     data,
                     label=f"{recon_chosen_sim[i]:.2f}, {recon_chosen_indices[i]}",
-                    color=color_list[i],
+                    # color=color_list[i],
                     linewidth=0.5,
                 )
-            if NORMALIZE:
+            if NORMALIZE and not ADDITIVE_PERTURBATION:
                 cur_reaching_point = calculate_step_of_A_to_T(
                     base_ref.act, recon_chosen_act[i]
                 )
@@ -991,10 +1008,10 @@ def plot_activate_sae_features(results):
 
 # %%
 # plotting here
-heatmap = False
+heatmap = True
 if heatmap:
     cur_key = activate_sae_feature_key
-    cur_id = 8
+    cur_id = 1
 
 num_features = False
 if num_features:
@@ -1019,7 +1036,8 @@ if heatmap:
     # If you need to maintain the order of elements as they appear in the original lists
     combined_list = list(dict.fromkeys(base_list + target_list))
 
-    heatmap_activation_evolution(combined_list, pert_all_act[cur_key][cur_id])
+    # heatmap_activation_evolution(combined_list, pert_all_act[cur_key][cur_id], cur_id)
+    plot_activation_evolution(combined_list, pert_all_act[cur_key][cur_id], cur_id)
 
     # plot_activation_evolution(base_ids[cur_key][cur_id], pert_all_act[cur_key][cur_id])
     # plot_activation_evolution(target_ids[cur_key][cur_id], pert_all_act[cur_key][cur_id])
