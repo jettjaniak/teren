@@ -22,7 +22,7 @@ from transformer_lens import HookedTransformer
 n_ctx = 10
 perturbation_layer_number = 1
 perturbation_layer = f"blocks.{perturbation_layer_number}.hook_resid_pre"
-seed = 55
+seed = 3123
 dataloader_batch_size = 15
 perturbation_pos = slice(-1, None, 1)
 read_layer = "blocks.11.hook_resid_post"
@@ -31,12 +31,12 @@ n_steps = 200
 mean_batch_size = 300
 sae_threshold = 0.05  # 0.05
 
-NORMALIZE = True
+NORMALIZE = False
 
 R_OTHER = False
 RANDOM = False
-PREDEFINED_OTHER = False
-ACTIVATE_SAE_FEATURE = True
+PREDEFINED_OTHER = True
+ACTIVATE_SAE_FEATURE = False
 
 SAE_RELU = True
 
@@ -325,13 +325,13 @@ def scan(
         alpha * direction for alpha in torch.linspace(*range, n_steps)
     ]
 
-    temp_dir = perturbed_steps[-1] - direction
+    if not NORMALIZE:
+        temp_dir = perturbed_steps[-1] - direction
 
-    similarity = cosine_similarity(
-        temp_dir.squeeze(0).squeeze(0), activations.squeeze(0).squeeze(0)
-    )
-    assert similarity > 0.999, f"Similarity is {similarity}"
-    # print("Cosine similarity with final vector and base vector:", similarity)
+        similarity = cosine_similarity(
+            temp_dir.squeeze(0).squeeze(0), activations.squeeze(0).squeeze(0)
+        )
+        assert similarity > 0.999, f"Similarity is {similarity}"
 
     if sae is not None:
         global base_acted, base_strs, base_ids
@@ -527,7 +527,7 @@ if PREDEFINED_OTHER:
             sorted_indices[-5:],  # last 5
         )
     )
-    predefined_other_prompts = batch_of_prompts[ret_indices][:2]
+    predefined_other_prompts = batch_of_prompts[ret_indices]
     chosen_similarities = [r_others_similarities[i] for i in ret_indices]
 # %%
 sae = get_gpt2_res_jb_saes(perturbation_layer)[0][perturbation_layer].to("cpu")
@@ -535,7 +535,34 @@ sae = get_gpt2_res_jb_saes(perturbation_layer)[0][perturbation_layer].to("cpu")
 
 if not SAE_RELU:
     sae.turn_off_activation()
+
+
 # %%
+def choose_indices(
+    sims,
+    num,
+    norm,
+    lower_threshold,
+    upper_threshold,
+    base_zero,
+):
+    recon_sorted_indices = np.argsort(sims)[::-1]  # type: ignore
+    ret = []
+    cur_chosen = 0
+    for i in range(0, len(recon_sorted_indices)):
+        if cur_chosen >= num:
+            break
+        base_zero[recon_sorted_indices[i]] = norm
+        decoded = sae.decode(base_zero)
+        _, _, _, ids, _ = explore_sae_space(decoded.unsqueeze(0).unsqueeze(0), sae)
+        if ids[0].shape[0] >= lower_threshold and ids[0].shape[0] <= upper_threshold:
+            ret.append(recon_sorted_indices[i])
+            cur_chosen += 1
+        # print(f"Feature {recon_sorted_indices[i]} is {ids}")
+        base_zero[recon_sorted_indices[i]] = 0
+    return ret
+
+
 if ACTIVATE_SAE_FEATURE:
     A_encoded = sae.encode(base_ref.act)[0, -1, :]
     sae_zero = A_encoded * 0
@@ -547,6 +574,8 @@ if ACTIVATE_SAE_FEATURE:
     recon_norm = []
     recon_batch_size = 2000
     selection = "singles"
+    choose_mid = True
+    choose_bad = True
 
     for start_idx in tqdm(range(0, sae_zero.shape[0], recon_batch_size)):
         end_idx = min(start_idx + recon_batch_size, sae_zero.shape[0])
@@ -568,57 +597,47 @@ if ACTIVATE_SAE_FEATURE:
             recon_norm.append(torch.norm(f_recon))
             recon_sim.append(cosine_similarity(A, f_recon))
 
-        # range_start = 0
-        # range_end = sae_zero.shape[0]
-
-        # for i in tqdm(range(range_start, range_end), desc="Outer loop"):
-        #     for j_start in range(i + 1, range_end, recon_batch_size):
-        #         j_end = min(j_start + recon_batch_size, range_end)
-        #         # print("batch end")
-        #         batch_sae_zero = []
-        #         for j in range(j_start, j_end):
-        #             temp_sae_zero = torch.zeros_like(sae_zero)
-        #             temp_sae_zero[i] = A_encoded_norm
-        #             temp_sae_zero[j] = A_encoded_norm
-        #             batch_sae_zero.append(temp_sae_zero)
-        #         batch_sae_zero = torch.stack(batch_sae_zero)
-
-        #         f_recon_batch = sae.decode(batch_sae_zero)
-
-        #         for f_recon in f_recon_batch:
-        #             recon_norm.append(torch.norm(f_recon))
-        #             recon_sim.append(cosine_similarity(A, f_recon))
-
-    # for i in tqdm(range(sae_zero.shape[0])):  #
-    #     sae_zero[i] = A_encoded_norm
-    #     f_recon = sae.decode(sae_zero)
-    #     # recon_act.append(f_recon)
-    #     recon_norm.append(torch.norm(f_recon))
-    #     recon_sim.append(cosine_similarity(A, f_recon))
-    #     sae_zero[i] = 0
-
-    num_chosen = 10
-    cur_chosen = 0
+    num_chosen = 5
     upper_threshold_for_bullshit = 2
 
-    recon_sorted_indices = np.argsort(recon_sim)[::-1]  # type: ignore
-    recon_to_be = []
-    for i in range(0, len(recon_sorted_indices)):
-        if cur_chosen >= num_chosen:
-            break
-        sae_zero[recon_sorted_indices[i]] = A_encoded_norm
-        decoded = sae.decode(sae_zero)
-        _, _, _, ids, _ = explore_sae_space(decoded.unsqueeze(0).unsqueeze(0), sae)
-        if ids[0].shape[0] <= upper_threshold_for_bullshit:
-            recon_to_be.append(recon_sorted_indices[i])
-            cur_chosen += 1
-        # print(f"Feature {recon_sorted_indices[i]} is {ids}")
-        sae_zero[recon_sorted_indices[i]] = 0
-
     # recon_chosen_indices = recon_sorted_indices[:num_chosen] # previous code, DON'T DELETE
-    recon_chosen_indices = recon_to_be
+    recon_chosen_indices = choose_indices(
+        sims=recon_sim,
+        num=num_chosen,
+        norm=A_encoded_norm,
+        lower_threshold=1,
+        upper_threshold=upper_threshold_for_bullshit,
+        base_zero=sae_zero,
+    )
     assert len(recon_chosen_indices) == num_chosen
-
+    if choose_mid:
+        recon_chosen_mid_indices = choose_indices(
+            sims=recon_sim,
+            num=num_chosen,
+            norm=A_encoded_norm,
+            lower_threshold=6,
+            upper_threshold=8,
+            base_zero=sae_zero,
+        )
+        for index in recon_chosen_mid_indices:
+            recon_chosen_indices.append(index)
+        assert len(recon_chosen_indices) == num_chosen + num_chosen * choose_mid
+    if choose_bad:
+        recon_chosen_bad_indices = choose_indices(
+            sims=recon_sim,
+            num=num_chosen,
+            norm=A_encoded_norm,
+            lower_threshold=100,
+            upper_threshold=25000,
+            base_zero=sae_zero,
+        )
+        for index in recon_chosen_bad_indices:
+            recon_chosen_indices.append(index)
+        assert (
+            len(recon_chosen_indices)
+            == num_chosen + num_chosen * choose_bad + num_chosen * choose_mid
+        )
+    num_chosen = len(recon_chosen_indices)
     recon_chosen_act = []
     for index in recon_chosen_indices:
         sae_zero[index] = A_encoded_norm
@@ -739,8 +758,14 @@ if ACTIVATE_SAE_FEATURE:
 
 results = defaultdict(list)
 
+loop_len = 10
+if PREDEFINED_OTHER:
+    loop_len = len(predefined_other_prompts)
+elif ACTIVATE_SAE_FEATURE:
+    loop_len = num_chosen
+
 # for _ in tqdm(range(len(ret_indices))):
-for _ in tqdm(range(num_chosen)):
+for _ in tqdm(range(loop_len)):
     for name, perturbation in perturbations.items():
         kl_div = run_perturbation(base_ref, perturbation)
         results[name].append(kl_div)
@@ -773,9 +798,6 @@ def plot_kl_blowup(results):
     plt.show()
 
 
-plot_kl_blowup(results)
-
-
 # %%
 def plot_num_active_features(new_ids, old_ids, threshold):
     plt.plot(new_ids, color="tab:orange", label="New Active Features")
@@ -799,24 +821,6 @@ def plot_max_values(max_values, perturbations_only_max_values):
     plt.ylabel("Max Value")
     plt.legend()
     plt.show()
-
-
-cur_key = predefined_other_key
-cur_id = 1
-new_ids = [
-    len([id for id in ids if id not in base_ids[cur_key][cur_id][0]])
-    for ids in pert_ids[cur_key][0]
-]
-old_ids = [
-    len([id for id in base_ids[cur_key][cur_id][0] if id in ids])
-    for ids in pert_ids[cur_key][cur_id]
-]
-
-plot_num_active_features(new_ids, old_ids, threshold=sae_threshold)
-plot_max_values(
-    perturbed_max_values[cur_key][cur_id],
-    perturbations_only_max_values[cur_key][cur_id],
-)
 
 
 # %%
@@ -889,22 +893,6 @@ def heatmap_activation_evolution(feature_ids, activations):
     plt.show()
 
 
-cur_key = activate_sae_feature_key
-cur_id = 8
-
-base_list = base_ids[cur_key][cur_id][0].tolist()
-target_list = target_ids[cur_key][cur_id][0].tolist()
-# Combine lists and remove duplicates
-combined_list = list(set(base_list) | set(target_list))
-# If you need to maintain the order of elements as they appear in the original lists
-combined_list = list(dict.fromkeys(base_list + target_list))
-
-heatmap_activation_evolution(combined_list, pert_all_act[cur_key][cur_id])
-# plot_activation_evolution(base_ids[cur_key][cur_id], pert_all_act[cur_key][cur_id])
-# plot_activation_evolution(target_ids[cur_key][cur_id], pert_all_act[cur_key][cur_id])
-# print(selected_activations)
-
-
 # %%
 def plot_predefined_other(results):
     first_5_colors = ["red"] * 5
@@ -951,9 +939,6 @@ def plot_predefined_other(results):
     plt.show()
 
 
-plot_predefined_other(results)
-
-
 # %%
 def plot_activate_sae_features(results):
     color_list = (
@@ -975,7 +960,7 @@ def plot_activate_sae_features(results):
                 # Only label the first line for each perturb_name
                 plt.plot(
                     data,
-                    # color=color_list[i],
+                    color=color_list[i],
                     label=f"{recon_chosen_sim[i]:.2f}, {recon_chosen_indices[i]}",
                     linewidth=0.5,
                 )
@@ -984,7 +969,7 @@ def plot_activate_sae_features(results):
                 plt.plot(
                     data,
                     label=f"{recon_chosen_sim[i]:.2f}, {recon_chosen_indices[i]}",
-                    # color=color_list[i],
+                    color=color_list[i],
                     linewidth=0.5,
                 )
             if NORMALIZE:
@@ -995,7 +980,7 @@ def plot_activate_sae_features(results):
                     plt.scatter(
                         cur_reaching_point,
                         results[perturb_name][i][cur_reaching_point],
-                        #    color=color_list[i],
+                        color=color_list[i],
                     )
     plt.legend(title="Cosine similarities", fontsize=8)
     plt.suptitle(f"seed={seed}")
@@ -1004,6 +989,124 @@ def plot_activate_sae_features(results):
     plt.show()
 
 
-plot_activate_sae_features(results)
+# %%
+# plotting here
+heatmap = False
+if heatmap:
+    cur_key = activate_sae_feature_key
+    cur_id = 8
+
+num_features = False
+if num_features:
+    cur_key = activate_sae_feature_key
+    cur_id = 8
+
+standard_kl_blowup = False
+
+if ACTIVATE_SAE_FEATURE:
+    plot_activate_sae_features(results)
+elif PREDEFINED_OTHER:
+    plot_predefined_other(results)
+
+if heatmap:
+    # cur_key = activate_sae_feature_key
+    # cur_id = 8
+
+    base_list = base_ids[cur_key][cur_id][0].tolist()
+    target_list = target_ids[cur_key][cur_id][0].tolist()
+    # Combine lists and remove duplicates
+    combined_list = list(set(base_list) | set(target_list))
+    # If you need to maintain the order of elements as they appear in the original lists
+    combined_list = list(dict.fromkeys(base_list + target_list))
+
+    heatmap_activation_evolution(combined_list, pert_all_act[cur_key][cur_id])
+
+    # plot_activation_evolution(base_ids[cur_key][cur_id], pert_all_act[cur_key][cur_id])
+    # plot_activation_evolution(target_ids[cur_key][cur_id], pert_all_act[cur_key][cur_id])
+    # print(selected_activations)
+
+if num_features:
+
+    # cur_key = predefined_other_key
+    # cur_id = 1
+    new_ids = [
+        len([id for id in ids if id not in base_ids[cur_key][cur_id][0]])
+        for ids in pert_ids[cur_key][0]
+    ]
+    old_ids = [
+        len([id for id in base_ids[cur_key][cur_id][0] if id in ids])
+        for ids in pert_ids[cur_key][cur_id]
+    ]
+
+    plot_num_active_features(new_ids, old_ids, threshold=sae_threshold)
+    plot_max_values(
+        perturbed_max_values[cur_key][cur_id],
+        perturbations_only_max_values[cur_key][cur_id],
+    )
+
+if standard_kl_blowup:
+    plot_kl_blowup(results)
+# %%
+check_clean_SAE_features = False
+if check_clean_SAE_features:
+    r_s_i = np.argsort(recon_sim)[::-1]  # type: ignore
+    upper_threshold_for_bullshit = 10
+    normal_threshold_for_bullshit = 2
+    clean_count = {i: 0 for i in range(1, upper_threshold_for_bullshit + 1)}
+    legit_clean_count = {i: 0 for i in range(1, upper_threshold_for_bullshit + 1)}
+    clean_str = {}
+    calc_clean = False
+    calc_str_parity = True
+
+    diff_in_clean = []
+    # for i in tqdm(range(0, len(r_s_i))):
+
+    #     sae_zero[r_s_i[i]] = A_encoded_norm
+    #     decoded = sae.decode(sae_zero)
+    #     _, _, _, ids, _ = explore_sae_space(decoded.unsqueeze(0).unsqueeze(0), sae)
+    #     if ids[0].shape[0] <= upper_threshold_for_bullshit:
+    #         clean_count += 1
+    #     sae_zero[recon_sorted_indices[i]] = 0
+
+    for start_idx in tqdm(range(0, sae_zero.shape[0], recon_batch_size)):
+        end_idx = min(start_idx + recon_batch_size, sae_zero.shape[0])
+        # Set the corresponding indices in sae_zero to A_encoded_norm
+
+        batch_sae_zero = []
+        for idx in range(start_idx, end_idx):
+            temp_sae_zero = torch.zeros_like(sae_zero)
+            temp_sae_zero[idx] = A_encoded_norm
+            batch_sae_zero.append(temp_sae_zero)
+
+        batch_sae_zero = torch.stack(batch_sae_zero)
+
+        # Decode the batch
+        f_recon_batch = sae.decode(batch_sae_zero).unsqueeze(1)
+        _, strs, _, ids, _ = explore_sae_space(f_recon_batch, sae)
+
+        if calc_clean:
+            for i in range(len(ids)):
+                for thresh in range(1, upper_threshold_for_bullshit + 1):
+                    if len(ids[i]) <= thresh:
+                        clean_count[thresh] += 1
+                        if ids[i][np.argmax(strs[i])] == start_idx + i:
+                            legit_clean_count[thresh] += 1
+        if calc_str_parity:
+            for i in range(len(ids)):
+                if len(ids[i]) <= normal_threshold_for_bullshit:
+                    if ids[i][np.argmax(strs[i])] == start_idx + i:
+                        diff_in_clean.append(A_encoded_norm - strs[i].max())
+
+    if calc_str_parity:
+        print(f"average diff in cleans {np.mean(diff_in_clean)}")
+
+    # print(f"clean count {clean_count}, start idx {start_idx}")
+    if calc_clean:
+        print(f"clean count {clean_count}")
+        print(f"legit clean count {legit_clean_count}")
+
+    # clean count       {1: 1452, 2: 3298, 3: 4778, 4: 6025, 5: 6960, 6: 7737, 7: 8454, 8: 9017, 9: 9449, 10: 9875}
+    # legit clean count {1: 1452, 2: 3298, 3: 4778, 4: 6025, 5: 6956, 6: 7733, 7: 8450, 8: 9013, 9: 9445, 10: 9870}
+
 
 # %%
