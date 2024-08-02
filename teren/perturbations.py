@@ -304,7 +304,6 @@ def scan(
 
     direction -= torch.mean(direction, dim=-1, keepdim=True)
     if (torch.linalg.vector_norm(direction, dim=-1).item() != 0.0) and (not reduce):
-        print("Normalizing direction")
         direction *= torch.linalg.vector_norm(
             activations, dim=-1, keepdim=True
         ) / torch.linalg.vector_norm(direction, dim=-1, keepdim=True)
