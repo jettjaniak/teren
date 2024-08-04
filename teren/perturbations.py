@@ -327,6 +327,7 @@ def run_perturbation(
     base_ref: Reference,
     perturbation: Perturbation,
     reduce: bool = False,
+    sae=None,
 ):
     perturbed_activations = scan(
         perturbation=perturbation,
@@ -336,6 +337,28 @@ def run_perturbation(
         range=cfg.perturbation_range,
     )
     kl_div = compare(base_ref, perturbed_activations)
+    if sae is not None:
+        f_acts = sae.encode(perturbed_activations[0])[0]
+        pert_f_acts = sae.encode(perturbed_activations[-1])[0]
+        active_features = {
+            f_idx: f_acts[f_idx]
+            for f_idx in range(f_acts.shape[0])
+            if f_acts[f_idx] / f_acts.max() > 0.1
+        }
+        pert_active_features = {
+            f_idx: pert_f_acts[f_idx]
+            for f_idx in range(pert_f_acts.shape[0])
+            if pert_f_acts[f_idx] / pert_f_acts.max() > 0.1
+        }
+        print(f"Initial feature activations: {f_acts[list(active_features.keys())]}")
+        print(f"Final feature activations: {pert_f_acts[list(active_features.keys())]}")
+        print(
+            f"Number of active features post pert: {len(pert_active_features.keys())}"
+        )
+        print(
+            f"Active features post pert: {pert_f_acts[list(pert_active_features.keys())]}"
+        )
+
     return kl_div
 
 
