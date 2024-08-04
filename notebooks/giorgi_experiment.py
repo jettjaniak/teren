@@ -19,10 +19,10 @@ from transformer_lens import HookedTransformer
 
 # %%
 # Config
-n_ctx = 50
-perturbation_layer_number = 1
+n_ctx = 10
+perturbation_layer_number = 0
 perturbation_layer = f"blocks.{perturbation_layer_number}.hook_resid_pre"
-seed = 51
+seed = 3
 dataloader_batch_size = 15
 perturbation_pos = slice(-1, None, 1)
 read_layer = "blocks.11.hook_resid_post"
@@ -35,14 +35,16 @@ NORMALIZE = True
 MEAN_NORMALIZE = True
 ADDITIVE_PERTURBATION = False
 
-R_OTHER = True
+R_OTHER = False
 RANDOM = False
 PREDEFINED_OTHER = False
+LAST_TOKEN = True
 ACTIVATE_SAE_FEATURE = False
 DAMPEN_FEATURE = False
 
+
 SAE_RELU = True
-CACHE = False
+CACHE = True
 
 torch.set_grad_enabled(False)
 
@@ -54,6 +56,7 @@ r_other_key = "r-other"
 predefined_other_key = "predefined-other"
 activate_sae_feature_key = "activate-sae-feature"
 dampen_feature_key = "dampen-feature"
+last_token_key = "last-token"
 
 keys = [
     random_key,
@@ -61,6 +64,7 @@ keys = [
     predefined_other_key,
     activate_sae_feature_key,
     dampen_feature_key,
+    last_token_key,
 ]
 
 # Create the dictionaries with empty lists for all keys
@@ -165,6 +169,17 @@ def get_predefined_activation(
     logits, cache = model.run_with_cache(prompt)
     ret = cache[layer][:, pos, :].to("cpu").detach()
     r_other_act.append(ret)
+    return ret
+
+
+def get_last_token_activation(
+    model: HookedTransformer, dataset: Dataset, n_ctx: int, layer: str, pos
+) -> torch.Tensor:
+    """Get a random last token activation from the dataset."""
+    rand_token = generate_prompt(dataset, n_ctx=1)
+    last_token_prompt = torch.cat((base_ref.prompt.clone()[:, -1:][0], rand_token[0]))
+    logits, cache = model.run_with_cache(last_token_prompt)
+    ret = cache[layer][:, pos, :].to("cpu").detach()
     return ret
 
 
@@ -306,6 +321,30 @@ class DampeningPerturbation(Perturbation):
             return target - resid_acts
 
 
+class LastTokenPerturbation(Perturbation):
+    """Random activation direction"""
+
+    def __init__(self, base_ref, dataset):
+        self.base_ref = base_ref
+        self.dataset = dataset
+        self.key = last_token_key
+
+    def generate(self, resid_acts):
+        target = get_last_token_activation(
+            self.base_ref.model,
+            self.dataset,
+            self.base_ref.n_ctx,
+            self.base_ref.perturbation_layer,
+            self.base_ref.perturbation_pos,
+        )
+        if CACHE:
+            r_other_act.append(target)
+        if ADDITIVE_PERTURBATION:
+            return target
+        else:
+            return target - resid_acts
+
+
 ###############################################
 # Running perturbations
 ###############################################
@@ -367,7 +406,6 @@ def scan(
         activations + alpha * direction for alpha in torch.linspace(*range, n_steps)
     ]
     perturbed_activations = torch.cat(perturbed_steps, dim=0)
-
     if not NORMALIZE:
         temp_dir = perturbed_steps[-1] - direction
 
@@ -822,21 +860,33 @@ if DAMPEN_FEATURE:
     else:
         just_dampen = True
         if just_dampen:
-            dampen_targets.append(sae.b_dec)
+            dampen_targets.append(torch.zeros_like(base_ref.act))
+            # dampen_targets.append(sae.b_dec)
         else:
-            _, strs, acts, ids, _ = explore_sae_space(base_ref.act, sae)
-            sorted_indices = torch.argsort(strs[0], descending=True)
+            v_a_f_d = False
+            if v_a_f_d:
+                _, strs, acts, ids, _ = explore_sae_space(base_ref.act, sae)
+                sorted_indices = torch.argsort(strs[0], descending=True)
 
-            (
-                acts[0][ids[0][sorted_indices[0].item()]],
-                # acts[0][ids[0][sorted_indices[1].item()]],
-            ) = (
-                -100,
-                # strs[0][sorted_indices[0].item()].clone(),
-            )
-            # print(acts[0][ids[0][sorted_indices[0].item()]])
-            # print(acts[0][ids[0][sorted_indices[1].item()]])
-            dampen_targets.append(sae.decode(acts[0]))
+                (
+                    acts[0][ids[0][sorted_indices[0].item()]],
+                    # acts[0][ids[0][sorted_indices[1].item()]],
+                ) = (
+                    0,
+                    # strs[0][sorted_indices[0].item()].clone(),
+                )
+                # print(acts[0][ids[0][sorted_indices[0].item()]])
+                # print(acts[0][ids[0][sorted_indices[1].item()]])
+                dampen_targets.append(sae.decode(acts[0]))
+            else:
+                # Generate a direction that reduces most activated feature in base_ref.act in SAE space
+                _, strs, acts, ids, _ = explore_sae_space(base_ref.act, sae)
+                sorted_indices = torch.argsort(strs[0], descending=True)
+                top_id = sorted_indices[0].item()
+                projection_vector = [sae.W_enc[i][top_id].item() for i in range(sae.cfg.d_in)]  # type: ignore
+                projection_vector = torch.tensor(projection_vector)
+                projection_vector = -projection_vector
+                dampen_targets.append(base_ref.act + projection_vector)
 
 # %%
 perturbations = {}
@@ -862,6 +912,10 @@ if ACTIVATE_SAE_FEATURE:
 if DAMPEN_FEATURE:
     dampen_feature_perturbation = DampeningPerturbation(dampen_targets)
     perturbations[dampen_feature_key] = dampen_feature_perturbation
+
+if LAST_TOKEN:
+    last_token_perturbation = LastTokenPerturbation(base_ref, dataset)
+    perturbations[last_token_key] = last_token_perturbation
 
 # %%
 torch.cuda.empty_cache()
@@ -900,9 +954,8 @@ for num_times in tqdm(range(loop_len)):
 def plot_kl_blowup(results):
     colors = {
         random_key: "tab:blue",
-        #        "naive random direction": "tab:purple",
         r_other_key: "tab:orange",
-        #        "inverse random activation direction": "tab:red",
+        last_token_key: "tab:red",
         activate_sae_feature_key: "tab:green",
         dampen_feature_key: "tab:purple",
     }
@@ -1062,18 +1115,17 @@ def plot_predefined_other(results):
         plt.legend(title="Cosine similarities", fontsize=8)
     if ADDITIVE_PERTURBATION:
         plt.suptitle("orthogonal r-others")
-    else:
-        plt.suptitle("r-other activation perturbation")
-    if ADDITIVE_PERTURBATION:
         plt.title(
             f"Top {len(predefined_other_prompts)} chosen out of {mean_batch_size}, seed={seed}, n_ctx={n_ctx}",
             fontsize=8,
         )
     else:
+        plt.suptitle("r-other activation perturbation")
         plt.title(
             f"Top, middle and bottom 5 r-other activations chosen out of {mean_batch_size}, seed={seed}, n_ctx={n_ctx}",
             fontsize=8,
         )
+
     plt.ylabel("KL divergence to base logits")
     plt.xlabel(f"Distance from base activation at {perturbation_layer}")
     plt.show()
@@ -1130,6 +1182,18 @@ def plot_activate_sae_features(results):
 
 
 # %%
+def plot_dampen_feature(results):
+    for perturb_name in results.keys():
+        for i, data in enumerate(results[perturb_name]):
+            plt.plot(data, linewidth=0.5)
+
+    plt.legend(fontsize=8)
+    plt.ylabel("KL divergence to base logits")
+    plt.xlabel(f"Distance from base activation at {perturbation_layer}")
+    plt.show()
+
+
+# %%
 # plotting here
 heatmap = False
 if heatmap:
@@ -1141,14 +1205,16 @@ if num_features:
     cur_key = activate_sae_feature_key
     cur_id = 8
 
-standard_kl_blowup = False
-if R_OTHER:
+standard_kl_blowup = True
+if R_OTHER or LAST_TOKEN:
     standard_kl_blowup = True
 
 if ACTIVATE_SAE_FEATURE:
     plot_activate_sae_features(results)
 elif PREDEFINED_OTHER:
     plot_predefined_other(results)
+# elif DAMPEN_FEATURE:
+#    plot_dampen_feature(results)
 
 if heatmap:
     # cur_key = activate_sae_feature_key
@@ -1164,6 +1230,8 @@ if heatmap:
     elif PREDEFINED_OTHER:
         _, _, _, target_list_tensor, _ = explore_sae_space(r_other_act[cur_id], sae)
         target_list = target_list_tensor[0].tolist()
+    elif DAMPEN_FEATURE:
+        target_list = []  # dampen_targets[cur_id].tolist()
     # Combine lists and remove duplicates
     combined_list = list(set(base_list) | set(target_list))
     # If you need to maintain the order of elements as they appear in the original lists
