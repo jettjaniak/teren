@@ -51,13 +51,17 @@ class RandomPerturbation(Perturbation):
 class RandomActivationPerturbation(Perturbation):
     """Random activation direction"""
 
-    def __init__(self, base_ref, target, dataset):
+    def __init__(self, base_ref, target, dataset, additive=False):
         self.base_ref = base_ref
         self.dataset = dataset
         self.target = target
+        self.additive = additive
 
     def generate(self, resid_acts):
-        return self.target - resid_acts
+        if self.additive:
+            return self.target
+        else:
+            return self.target - resid_acts
 
 
 @dataclass
@@ -162,6 +166,7 @@ class OtherFeaturePerturbation(Perturbation):
         single_dir = self.sae.W_dec[self.base_f_idx] * (
             self.target_f_act.item() - self.base_f_act.item()
         )
+        print(self.base_f_act.item(), self.target_f_act.item())
 
         if isinstance(self.base_ref.perturbation_pos, slice):
             dir = torch.stack(
@@ -354,9 +359,6 @@ def run_perturbation(
         print(f"Final feature activations: {pert_f_acts[list(active_features.keys())]}")
         print(
             f"Number of active features post pert: {len(pert_active_features.keys())}"
-        )
-        print(
-            f"Active features post pert: {pert_f_acts[list(pert_active_features.keys())]}"
         )
 
     return kl_div
