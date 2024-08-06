@@ -91,29 +91,19 @@ class SAEActivationPerturbation(Perturbation):
 class SyntheticActivationPerturbation(Perturbation):
     """Towards activation made up of random SAE features"""
 
-    def __init__(self, base_ref, thresh, dataset, sae, target_f_idxs, additive):
+    def __init__(self, base_ref, dataset, sae, target_f_idxs, target_f_acts, additive):
         self.base_ref = base_ref
         self.dataset = dataset
-        self.thresh = thresh
         self.sae = sae
         self.target_f_idxs = target_f_idxs
         self.additive = additive
-        self.feature_acts = sae.encode(base_ref.cache[sae.cfg.hook_name])[0, -1, :]
-        self.active_features = {
-            f_idx: self.feature_acts[f_idx]
-            for f_idx in range(self.sae.W_dec.shape[0])
-            if self.feature_acts[f_idx] / self.feature_acts.max() > self.thresh
-        }
+        self.target_feature_acts = target_f_acts
 
     def generate(self, resid_acts):
-        target_feature_acts = torch.zeros_like(self.feature_acts)
-        for i, f_act in enumerate(self.active_features.values()):
-            target_feature_acts[self.target_f_idxs[i]] = f_act
-
         if self.additive:
-            return self.sae.decode(target_feature_acts).unsqueeze(0).unsqueeze(0)
+            return self.sae.decode(self.target_feature_acts).unsqueeze(0).unsqueeze(0)
         else:
-            return self.sae.decode(target_feature_acts) - self.sae.decode(
+            return self.sae.decode(self.target_feature_acts) - self.sae.decode(
                 self.sae.encode(resid_acts)
             )
 
