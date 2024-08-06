@@ -343,10 +343,13 @@ def run_perturbation(
         pert_active_features = {
             f_idx: pert_f_acts[f_idx]
             for f_idx in range(pert_f_acts.shape[0])
-            if pert_f_acts[f_idx] / pert_f_acts.max() > 0.1
+            if pert_f_acts[f_idx] / pert_f_acts.max(dim=-1)[0] > 0.1
         }
         print(f"Initial feature activations: {f_acts[list(active_features.keys())]}")
         print(f"Final feature activations: {pert_f_acts[list(active_features.keys())]}")
+        print(
+            f"Most active feature post pert: {pert_f_acts.max(dim=-1)[1]}, {pert_f_acts.max(dim=-1)[0]}"
+        )
         print(
             f"Number of active features post pert: {len(pert_active_features.keys())}"
         )
