@@ -75,16 +75,15 @@ class SAEActivationPerturbation(Perturbation):
         self.sae = sae
 
     def generate(self, resid_acts):
+        print(f"Base Recon Error: {(resid_acts - self.base_ref.act).abs().sum()}")
         print(
-            f"Base Recon Error: {(self.sae.decode(self.sae.encode(resid_acts)) - resid_acts).abs().sum()}"
+            f"Double Base Recon Error: {(self.sae.decode(self.sae.encode(resid_acts)) - resid_acts).abs().sum()}"
         )
         print(
             f"Target Recon Error: {(self.sae.decode(self.sae.encode(self.target)) - self.target).abs().sum()}"
         )
 
-        return self.sae.decode(self.sae.encode(self.target)) - self.sae.decode(
-            self.sae.encode(resid_acts)
-        )
+        return self.sae.decode(self.sae.encode(self.target)) - resid_acts
 
 
 @dataclass
@@ -103,9 +102,7 @@ class SyntheticActivationPerturbation(Perturbation):
         if self.additive:
             return self.sae.decode(self.target_feature_acts).unsqueeze(0).unsqueeze(0)
         else:
-            return self.sae.decode(self.target_feature_acts) - self.sae.decode(
-                self.sae.encode(resid_acts)
-            )
+            return self.sae.decode(self.target_feature_acts) - resid_acts
 
 
 @dataclass
@@ -278,7 +275,7 @@ def compare(
     perturbed_activations: Float[torch.Tensor, "... n_steps 1 d_model"],
 ) -> Float[torch.Tensor, "n_steps"]:
     logits_pert, cache = run_perturbed_activation(base_ref, perturbed_activations)
-    kl_div = compute_kl_div(base_ref.logits, logits_pert)[
+    kl_div = compute_kl_div(logits_pert[0], logits_pert)[
         :, base_ref.perturbation_pos
     ].squeeze(-1)
     return kl_div
@@ -323,16 +320,28 @@ def run_perturbation(
     perturbation: Perturbation,
     reduce: bool = False,
     sae=None,
+    verbose: bool = False,
 ):
-    perturbed_activations = scan(
-        perturbation=perturbation,
-        activations=base_ref.act,
-        n_steps=cfg.n_steps,
-        reduce=reduce,
-        range=cfg.perturbation_range,
-    )
+    if isinstance(perturbation, SyntheticActivationPerturbation) or isinstance(
+        perturbation, SAEActivationPerturbation
+    ):
+        perturbed_activations = scan(
+            perturbation=perturbation,
+            activations=sae.decode(sae.encode(base_ref.act)),
+            n_steps=cfg.n_steps,
+            reduce=reduce,
+            range=cfg.perturbation_range,
+        )
+    else:
+        perturbed_activations = scan(
+            perturbation=perturbation,
+            activations=base_ref.act,
+            n_steps=cfg.n_steps,
+            reduce=reduce,
+            range=cfg.perturbation_range,
+        )
     kl_div = compare(base_ref, perturbed_activations)
-    if sae is not None:
+    if verbose:
         f_acts = sae.encode(perturbed_activations[0])[0]
         pert_f_acts = sae.encode(perturbed_activations[-1])[0]
         active_features = {
