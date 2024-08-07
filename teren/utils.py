@@ -1,3 +1,4 @@
+import math
 import random
 from typing import cast
 
@@ -74,6 +75,30 @@ def compute_kl_div(logits_ref: torch.Tensor, logits_pert: torch.Tensor) -> torch
         logprobs_pert, logprobs_ref, log_target=True, reduction="none"
     )
     return temp_output.sum(dim=-1)
+
+
+def compute_js_div(
+    p_logit: torch.Tensor,
+    q_logit: torch.Tensor,
+) -> torch.Tensor:
+    p_logprob = torch.log_softmax(p_logit, dim=-1)
+    q_logprob = torch.log_softmax(q_logit, dim=-1)
+    p = p_logprob.exp()
+    q = q_logprob.exp()
+
+    # convert to log2
+    p_logprob *= math.log2(math.e)
+    q_logprob *= math.log2(math.e)
+
+    m = 0.5 * (p + q)
+    m_logprob = m.log2()
+
+    p_kl_div = (p * (p_logprob - m_logprob)).sum(-1)
+    q_kl_div = (q * (q_logprob - m_logprob)).sum(-1)
+
+    assert p_kl_div.isfinite().all()
+    assert q_kl_div.isfinite().all()
+    return (p_kl_div + q_kl_div) / 2
 
 
 def get_random_activation(

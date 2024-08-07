@@ -10,7 +10,13 @@ from sae_lens import SAE
 from torch.distributions.multivariate_normal import MultivariateNormal
 
 from teren.config import ExperimentConfig, Reference
-from teren.utils import compute_kl_div, generate_prompt, get_random_activation, set_seed
+from teren.utils import (
+    compute_js_div,
+    compute_kl_div,
+    generate_prompt,
+    get_random_activation,
+    set_seed,
+)
 
 
 @dataclass(kw_only=True)
@@ -278,7 +284,10 @@ def compare(
     kl_div = compute_kl_div(logits_pert[0], logits_pert)[
         :, base_ref.perturbation_pos
     ].squeeze(-1)
-    return kl_div
+    js_div = compute_js_div(logits_pert[0], logits_pert)[
+        :, base_ref.perturbation_pos
+    ].squeeze(-1)
+    return js_div
 
 
 def scan(
@@ -347,12 +356,12 @@ def run_perturbation(
         active_features = {
             f_idx: f_acts[f_idx]
             for f_idx in range(f_acts.shape[0])
-            if f_acts[f_idx] / f_acts.max() > 0.1
+            if f_acts[f_idx] / f_acts.max() > 0.05
         }
         pert_active_features = {
             f_idx: pert_f_acts[f_idx]
             for f_idx in range(pert_f_acts.shape[0])
-            if pert_f_acts[f_idx] / pert_f_acts.max(dim=-1)[0] > 0.1
+            if pert_f_acts[f_idx] / pert_f_acts.max(dim=-1)[0] > 0.05
         }
         print(f"Initial feature activations: {f_acts[list(active_features.keys())]}")
         print(f"Final feature activations: {pert_f_acts[list(active_features.keys())]}")
