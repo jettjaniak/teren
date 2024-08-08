@@ -1,4 +1,5 @@
 import math
+from dataclasses import field
 
 from datasets import Dataset, VerificationMode, load_dataset
 from fancy_einsum import einsum
@@ -94,10 +95,10 @@ def get_act_range(
 
 def compute_pert_resid_acts(
     abl_resid_acts: Float[torch.Tensor, "prompt seq model"],
-    act_values: Float[torch.Tensor, "act"],
+    act_vals: Float[torch.Tensor, "act"],
     dir: Float[torch.Tensor, "model"],
 ) -> Float[torch.Tensor, "act prompt seq model"]:
-    pert = einsum("act, model -> act model", act_values, dir)
+    pert = einsum("act, model -> act model", act_vals, dir)
     n_acts, d_model = pert.shape
     return abl_resid_acts + pert.view(n_acts, 1, 1, d_model)
 
@@ -125,48 +126,136 @@ def comp_model_js_div(
     resid_acts_a: Float[torch.Tensor, "prompt seq model"],
     resid_acts_b: Float[torch.Tensor, "prompt seq model"],
     batch_size: int,
-) -> Float[torch.Tensor, "prompt seq"]:
+    logits_seq: Optional[Int[torch.Tensor, "prompt"]] = None,
+) -> Float[torch.Tensor, "prompt #seq"]:
+    def get_logits(resid_acts):
+        logits = model(
+            resid_acts,
+            start_at_layer=layer,
+        )
+        if logits_seq is None:
+            return logits
+        return torch.gather(
+            logits, dim=1, index=logits_seq.view(-1, 1, 1).to(logits.device)
+        )
+
     n_prompts, seq_len = resid_acts_a.shape[:2]
-    jsd = torch.empty(n_prompts, seq_len)
+    jsd = torch.empty(n_prompts, seq_len if logits_seq is None else 1)
     for i in trange(0, n_prompts, batch_size):
         batch_resid_acts_a = resid_acts_a[i : i + batch_size]
         batch_resid_acts_b = resid_acts_b[i : i + batch_size]
-        logits_a = model(
-            batch_resid_acts_a,
-            start_at_layer=layer,
-        )
-        logits_b = model(
-            batch_resid_acts_b,
-            start_at_layer=layer,
-        )
+        logits_a = get_logits(batch_resid_acts_a)
+        logits_b = get_logits(batch_resid_acts_b)
         jsd[i : i + batch_size] = comp_js_divergence(logits_a, logits_b)
     return jsd
 
 
-def dir_to_js_dist_hist(
+def dir_to_js_dist(
+    dir: Float[torch.Tensor, "model"],
     model: HookedTransformer,
     layer: int,
-    dir: Float[torch.Tensor, "model"],
     resid_acts: Float[torch.Tensor, "prompt seq model"],
     batch_size: int,
     acts_q_range: tuple[float, float],
-    bins: int,
 ):
     dir_acts = compute_dir_acts(dir, resid_acts)
     acts_range = get_act_range(dir_acts, *acts_q_range)
     abl_resid_acts = ablate_dir(resid_acts, dir, dir_acts)
+    return dir_fracs_to_js_dists(
+        dir=dir,
+        act_fracs=[0.0, 1.0],
+        act_range=acts_range,
+        abl_resid_acts=abl_resid_acts,
+        model=model,
+        layer=layer,
+        batch_size=batch_size,
+    )[(1.0, 0.0)]
+
+
+def dir_fracs_to_js_dists(
+    dir: Float[torch.Tensor, "model"],
+    act_fracs: list[float],
+    act_range: tuple[float, float],
+    abl_resid_acts: Float[torch.Tensor, "prompt seq model"],
+    model: HookedTransformer,
+    layer: int,
+    batch_size: int,
+    logits_seq: Optional[Int[torch.Tensor, "prompt"]] = None,
+):
+    act_min, act_max = act_range
+    act_vals = act_min + torch.tensor(act_fracs) * (act_max - act_min)
     pert_resid_acts = compute_pert_resid_acts(
         abl_resid_acts=abl_resid_acts,
-        act_values=torch.tensor(acts_range),
+        act_vals=act_vals,
         dir=dir,
     )
-    pert_resid_acts_min, pert_resid_acts_max = pert_resid_acts
-    js_dist = comp_model_js_div(
-        model,
-        layer,
-        pert_resid_acts_min,
-        pert_resid_acts_max,
-        batch_size=batch_size // 2,
-    ).sqrt()
-    counts, _edges = torch.histogram(js_dist, bins=bins, range=(0, 1))
-    return counts.int()
+    ret = {}
+    for i in range(len(act_fracs)):
+        for j in range(i):
+            ret[(act_fracs[i], act_fracs[j])] = comp_model_js_div(
+                model,
+                layer,
+                resid_acts_a=pert_resid_acts[i],
+                resid_acts_b=pert_resid_acts[j],
+                batch_size=batch_size // 2,
+                logits_seq=logits_seq,
+            ).sqrt()
+    return ret
+
+
+@dataclass(kw_only=True)
+class ExperimentContext:
+    model: HookedTransformer
+    layer: int
+    input_ids: Int[torch.Tensor, "prompt seq"]
+    acts_q_range: tuple[float, float]
+    batch_size: int
+    resid_acts: Float[torch.Tensor, "prompt seq model"] = field(init=False)
+
+    def __post_init__(self):
+        self.resid_acts = get_clean_resid_acts(
+            self.model, self.layer, self.input_ids, self.batch_size
+        )
+
+    def get_svd_dirs(self):
+        _u, _s, vh = torch.linalg.svd(
+            self.resid_acts.view(-1, self.d_model), full_matrices=False
+        )
+        return vh.T
+
+    @property
+    def d_model(self):
+        return self.model.cfg.d_model
+
+
+class Direction:
+    def __init__(self, dir: Float[torch.Tensor, "model"], exctx: ExperimentContext):
+        self.dir = dir
+        self.exctx = exctx
+        self.dir_acts = compute_dir_acts(dir, exctx.resid_acts)
+        self.act_min, self.act_max = get_act_range(self.dir_acts, *exctx.acts_q_range)
+        self.abl_resid_acts = ablate_dir(exctx.resid_acts, dir, self.dir_acts)
+
+    def act_fracs_to_js_dists(
+        self,
+        act_fracs: Float[torch.Tensor, "acts"],
+        logits_seq: Optional[Int[torch.Tensor, "prompt"]] = None,
+    ) -> Mapping[tuple[float, float], Float[torch.Tensor, "prompt #seq"]]:
+        act_vals = self.act_min + act_fracs * (self.act_max - self.act_min)
+        pert_resid_acts = compute_pert_resid_acts(
+            abl_resid_acts=self.abl_resid_acts,
+            act_vals=act_vals,
+            dir=self.dir,
+        )
+        ret = {}
+        for i in range(act_fracs.shape[0]):
+            for j in range(i):
+                ret[(act_fracs[i].item(), act_fracs[j].item())] = comp_model_js_div(
+                    self.exctx.model,
+                    self.exctx.layer,
+                    resid_acts_a=pert_resid_acts[i],
+                    resid_acts_b=pert_resid_acts[j],
+                    batch_size=self.exctx.batch_size // 2,
+                    logits_seq=logits_seq,
+                ).sqrt()
+        return ret
