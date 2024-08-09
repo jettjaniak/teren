@@ -136,12 +136,16 @@ def comp_model_js_div(
         if logits_seq is None:
             return logits
         return torch.gather(
-            logits, dim=1, index=logits_seq.view(-1, 1, 1).to(logits.device)
+            logits,
+            dim=1,
+            index=logits_seq.view(-1, 1, 1)
+            .expand(-1, -1, logits.shape[-1])
+            .to(logits.device),
         )
 
     n_prompts, seq_len = resid_acts_a.shape[:2]
     jsd = torch.empty(n_prompts, seq_len if logits_seq is None else 1)
-    for i in trange(0, n_prompts, batch_size):
+    for i in range(0, n_prompts, batch_size):
         batch_resid_acts_a = resid_acts_a[i : i + batch_size]
         batch_resid_acts_b = resid_acts_b[i : i + batch_size]
         logits_a = get_logits(batch_resid_acts_a)
@@ -234,23 +238,37 @@ class Direction:
         self.exctx = exctx
         self.dir_acts = compute_dir_acts(dir, exctx.resid_acts)
         self.act_min, self.act_max = get_act_range(self.dir_acts, *exctx.acts_q_range)
-        self.abl_resid_acts = ablate_dir(exctx.resid_acts, dir, self.dir_acts)
+        # self.abl_resid_acts = ablate_dir(exctx.resid_acts, dir, self.dir_acts)
+
+    def __hash__(self):
+        return hash(self.dir)
+
+    def __eq__(self, other):
+        return self.dir is other.dir
 
     def act_fracs_to_js_dists(
         self,
         act_fracs: Float[torch.Tensor, "acts"],
+        prompt_indices: Optional[Int[torch.Tensor, "prompt"]] = None,
         logits_seq: Optional[Int[torch.Tensor, "prompt"]] = None,
-    ) -> Mapping[tuple[float, float], Float[torch.Tensor, "prompt #seq"]]:
+    ) -> Mapping[tuple[int, int], Float[torch.Tensor, "prompt #seq"]]:
         act_vals = self.act_min + act_fracs * (self.act_max - self.act_min)
+        if prompt_indices is None:
+            resid_acts = self.exctx.resid_acts
+            dir_acts = self.dir_acts
+        else:
+            resid_acts = self.exctx.resid_acts[prompt_indices]
+            dir_acts = self.dir_acts[prompt_indices]
+        abl_resid_acts = ablate_dir(resid_acts, self.dir, dir_acts)
         pert_resid_acts = compute_pert_resid_acts(
-            abl_resid_acts=self.abl_resid_acts,
+            abl_resid_acts=abl_resid_acts,
             act_vals=act_vals,
             dir=self.dir,
         )
         ret = {}
         for i in range(act_fracs.shape[0]):
             for j in range(i):
-                ret[(act_fracs[i].item(), act_fracs[j].item())] = comp_model_js_div(
+                ret[i, j] = ret[j, i] = comp_model_js_div(
                     self.exctx.model,
                     self.exctx.layer,
                     resid_acts_a=pert_resid_acts[i],
@@ -258,4 +276,8 @@ class Direction:
                     batch_size=self.exctx.batch_size // 2,
                     logits_seq=logits_seq,
                 ).sqrt()
+        shape = next(iter(ret.values())).shape
+        zeros = torch.zeros(shape)
+        for i in range(act_fracs.shape[0]):
+            ret[i, i] = zeros
         return ret

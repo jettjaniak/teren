@@ -24,7 +24,6 @@ print(f"{INFERENCE_BATCH_SIZE=}")
 
 N_PROMPTS = INFERENCE_BATCH_SIZE * 5
 
-
 input_ids = dau.get_input_ids(chunk=0, seq_len=SEQ_LEN)[:N_PROMPTS]
 model = HookedTransformer.from_pretrained("gpt2-small", device=device)
 
