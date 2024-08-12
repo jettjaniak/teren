@@ -93,14 +93,11 @@ def get_act_range(
     return qs[0].item(), qs[1].item()
 
 
-def compute_pert_resid_acts(
-    abl_resid_acts: Float[torch.Tensor, "prompt seq model"],
+def get_act_vec(
     act_vals: Float[torch.Tensor, "act"],
     dir: Float[torch.Tensor, "model"],
-) -> Float[torch.Tensor, "act prompt seq model"]:
-    pert = einsum("act, model -> act model", act_vals, dir)
-    n_acts, d_model = pert.shape
-    return abl_resid_acts + pert.view(n_acts, 1, 1, d_model)
+) -> Float[torch.Tensor, "act model"]:
+    return einsum("act, model -> act model", act_vals, dir)
 
 
 def get_logits(
@@ -123,88 +120,30 @@ def get_logits(
 def comp_model_js_div(
     model: HookedTransformer,
     layer: int,
-    resid_acts_a: Float[torch.Tensor, "prompt seq model"],
-    resid_acts_b: Float[torch.Tensor, "prompt seq model"],
+    abl_resid_acts: Float[torch.Tensor, "prompt seq model"],
+    act_vec_a: Float[torch.Tensor, "model"],
+    act_vec_b: Float[torch.Tensor, "model"],
     batch_size: int,
-    logits_seq: Optional[Int[torch.Tensor, "prompt"]] = None,
-) -> Float[torch.Tensor, "prompt #seq"]:
-    def get_logits(resid_acts):
-        logits = model(
+) -> Float[torch.Tensor, "seq prompt seq"]:
+    def get_logits(abl_resid_acts, act_vec, seq_patch):
+        resid_acts = abl_resid_acts.clone()
+        resid_acts[:, seq_patch] += act_vec
+        return model(
             resid_acts,
             start_at_layer=layer,
-        )
-        if logits_seq is None:
-            return logits
-        return torch.gather(
-            logits,
-            dim=1,
-            index=logits_seq.view(-1, 1, 1)
-            .expand(-1, -1, logits.shape[-1])
-            .to(logits.device),
-        )
+        )[:, seq_patch:]
 
-    n_prompts, seq_len = resid_acts_a.shape[:2]
-    jsd = torch.empty(n_prompts, seq_len if logits_seq is None else 1)
+    n_prompts, seq_len = abl_resid_acts.shape[:2]
+    jsd = torch.zeros(seq_len, n_prompts, seq_len)
     for i in range(0, n_prompts, batch_size):
-        batch_resid_acts_a = resid_acts_a[i : i + batch_size]
-        batch_resid_acts_b = resid_acts_b[i : i + batch_size]
-        logits_a = get_logits(batch_resid_acts_a)
-        logits_b = get_logits(batch_resid_acts_b)
-        jsd[i : i + batch_size] = comp_js_divergence(logits_a, logits_b)
+        batch_abl_resid_acts = abl_resid_acts[i : i + batch_size]
+        for seq_patch in range(seq_len):
+            logits_a = get_logits(batch_abl_resid_acts, act_vec_a, seq_patch)
+            logits_b = get_logits(batch_abl_resid_acts, act_vec_b, seq_patch)
+            jsd[seq_patch, i : i + batch_size, seq_patch:] = comp_js_divergence(
+                logits_a, logits_b
+            )
     return jsd
-
-
-def dir_to_js_dist(
-    dir: Float[torch.Tensor, "model"],
-    model: HookedTransformer,
-    layer: int,
-    resid_acts: Float[torch.Tensor, "prompt seq model"],
-    batch_size: int,
-    acts_q_range: tuple[float, float],
-):
-    dir_acts = compute_dir_acts(dir, resid_acts)
-    acts_range = get_act_range(dir_acts, *acts_q_range)
-    abl_resid_acts = ablate_dir(resid_acts, dir, dir_acts)
-    return dir_fracs_to_js_dists(
-        dir=dir,
-        act_fracs=[0.0, 1.0],
-        act_range=acts_range,
-        abl_resid_acts=abl_resid_acts,
-        model=model,
-        layer=layer,
-        batch_size=batch_size,
-    )[(1.0, 0.0)]
-
-
-def dir_fracs_to_js_dists(
-    dir: Float[torch.Tensor, "model"],
-    act_fracs: list[float],
-    act_range: tuple[float, float],
-    abl_resid_acts: Float[torch.Tensor, "prompt seq model"],
-    model: HookedTransformer,
-    layer: int,
-    batch_size: int,
-    logits_seq: Optional[Int[torch.Tensor, "prompt"]] = None,
-):
-    act_min, act_max = act_range
-    act_vals = act_min + torch.tensor(act_fracs) * (act_max - act_min)
-    pert_resid_acts = compute_pert_resid_acts(
-        abl_resid_acts=abl_resid_acts,
-        act_vals=act_vals,
-        dir=dir,
-    )
-    ret = {}
-    for i in range(len(act_fracs)):
-        for j in range(i):
-            ret[(act_fracs[i], act_fracs[j])] = comp_model_js_div(
-                model,
-                layer,
-                resid_acts_a=pert_resid_acts[i],
-                resid_acts_b=pert_resid_acts[j],
-                batch_size=batch_size // 2,
-                logits_seq=logits_seq,
-            ).sqrt()
-    return ret
 
 
 @dataclass(kw_only=True)
@@ -248,10 +187,9 @@ class Direction:
 
     def act_fracs_to_js_dists(
         self,
-        act_fracs: Float[torch.Tensor, "acts"],
+        act_fracs: Float[torch.Tensor, "act"],
         prompt_indices: Optional[Int[torch.Tensor, "prompt"]] = None,
-        logits_seq: Optional[Int[torch.Tensor, "prompt"]] = None,
-    ) -> Mapping[tuple[int, int], Float[torch.Tensor, "prompt #seq"]]:
+    ) -> Float[torch.Tensor, "act act seq prompt seq"]:
         act_vals = self.act_min + act_fracs * (self.act_max - self.act_min)
         if prompt_indices is None:
             resid_acts = self.exctx.resid_acts
@@ -260,24 +198,22 @@ class Direction:
             resid_acts = self.exctx.resid_acts[prompt_indices]
             dir_acts = self.dir_acts[prompt_indices]
         abl_resid_acts = ablate_dir(resid_acts, self.dir, dir_acts)
-        pert_resid_acts = compute_pert_resid_acts(
-            abl_resid_acts=abl_resid_acts,
+        act_vecs = get_act_vec(
             act_vals=act_vals,
             dir=self.dir,
         )
-        ret = {}
-        for i in range(act_fracs.shape[0]):
+        n_prompt, n_seq = resid_acts.shape[:2]
+        n_act = act_fracs.shape[0]
+        ret = torch.empty(n_act, n_act, n_seq, n_prompt, n_seq)
+        for i in range(n_act):
+            ret[i, i] = 0
             for j in range(i):
                 ret[i, j] = ret[j, i] = comp_model_js_div(
                     self.exctx.model,
                     self.exctx.layer,
-                    resid_acts_a=pert_resid_acts[i],
-                    resid_acts_b=pert_resid_acts[j],
+                    abl_resid_acts=abl_resid_acts,
+                    act_vec_a=act_vecs[i],
+                    act_vec_b=act_vecs[j],
                     batch_size=self.exctx.batch_size // 2,
-                    logits_seq=logits_seq,
                 ).sqrt()
-        shape = next(iter(ret.values())).shape
-        zeros = torch.zeros(shape)
-        for i in range(act_fracs.shape[0]):
-            ret[i, i] = zeros
         return ret
