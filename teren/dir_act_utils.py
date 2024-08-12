@@ -124,7 +124,7 @@ def comp_model_js_div(
     act_vec_a: Float[torch.Tensor, "model"],
     act_vec_b: Float[torch.Tensor, "model"],
     batch_size: int,
-) -> Float[torch.Tensor, "seq prompt seq"]:
+) -> Float[torch.Tensor, "prompt seq seq"]:
     def get_logits(abl_resid_acts, act_vec, seq_patch):
         resid_acts = abl_resid_acts.clone()
         resid_acts[:, seq_patch] += act_vec
@@ -134,13 +134,13 @@ def comp_model_js_div(
         )[:, seq_patch:]
 
     n_prompts, seq_len = abl_resid_acts.shape[:2]
-    jsd = torch.zeros(seq_len, n_prompts, seq_len)
+    jsd = torch.zeros(n_prompts, seq_len, seq_len)
     for i in range(0, n_prompts, batch_size):
         batch_abl_resid_acts = abl_resid_acts[i : i + batch_size]
         for seq_patch in range(seq_len):
             logits_a = get_logits(batch_abl_resid_acts, act_vec_a, seq_patch)
             logits_b = get_logits(batch_abl_resid_acts, act_vec_b, seq_patch)
-            jsd[seq_patch, i : i + batch_size, seq_patch:] = comp_js_divergence(
+            jsd[i : i + batch_size, seq_patch, seq_patch:] = comp_js_divergence(
                 logits_a, logits_b
             )
     return jsd
@@ -189,7 +189,7 @@ class Direction:
         self,
         act_fracs: Float[torch.Tensor, "act"],
         prompt_indices: Optional[Int[torch.Tensor, "prompt"]] = None,
-    ) -> Float[torch.Tensor, "act act seq prompt seq"]:
+    ) -> Float[torch.Tensor, "act act prompt seq seq"]:
         act_vals = self.act_min + act_fracs * (self.act_max - self.act_min)
         if prompt_indices is None:
             resid_acts = self.exctx.resid_acts
@@ -204,7 +204,7 @@ class Direction:
         )
         n_prompt, n_seq = resid_acts.shape[:2]
         n_act = act_fracs.shape[0]
-        ret = torch.empty(n_act, n_act, n_seq, n_prompt, n_seq)
+        ret = torch.empty(n_act, n_act, n_prompt, n_seq, n_seq)
         for i in range(n_act):
             ret[i, i] = 0
             for j in range(i):
