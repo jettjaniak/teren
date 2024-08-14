@@ -1,6 +1,4 @@
 import math
-from dataclasses import field
-from functools import partial
 
 from datasets import Dataset, VerificationMode, load_dataset
 from fancy_einsum import einsum
@@ -41,33 +39,6 @@ def get_clean_resid_acts(
             stop_at_layer=layer,
         )
     return resid_acts
-
-
-LOG2E = math.log2(math.e)
-
-
-def comp_js_divergence(
-    p_logit: Float[torch.Tensor, "*batch vocab"],
-    q_logit: Float[torch.Tensor, "*batch vocab"],
-) -> Float[torch.Tensor, "*batch"]:
-    p_logprob = torch.log_softmax(p_logit, dim=-1)
-    q_logprob = torch.log_softmax(q_logit, dim=-1)
-    p = p_logprob.exp()
-    q = q_logprob.exp()
-
-    # convert to log2
-    p_logprob *= LOG2E
-    q_logprob *= LOG2E
-
-    m = 0.5 * (p + q)
-    m_logprob = m.log2()
-
-    p_kl_div = (p * (p_logprob - m_logprob)).sum(-1)
-    q_kl_div = (q * (q_logprob - m_logprob)).sum(-1)
-
-    assert p_kl_div.isfinite().all()
-    assert q_kl_div.isfinite().all()
-    return (p_kl_div + q_kl_div) / 2
 
 
 def compute_dir_acts(
@@ -119,6 +90,27 @@ def get_logits(
     return logits
 
 
+def get_outputs(
+    *,
+    model: HookedTransformer,
+    start_at_layer: int,
+    stop_at_layer: int,
+    abl_resid_acts: Float[torch.Tensor, "prompt seq model"],
+    act_vec: Float[torch.Tensor, "model"],
+    seq_in_out_idxs: Optional[Int[torch.Tensor, "prompt 2"]],
+    seq_in_idx: Optional[int],
+):
+    """Get general model outputs"""
+    resid_acts = abl_resid_acts.clone()
+    resid_acts[:, seq_in_idx_] += act_vec
+    all_outputs = model(
+        resid_acts, start_at_layer=start_at_layer, stop_at_layer=stop_at_layer
+    )
+    if select_seq:
+        return all_outputs[:, seq_out_idx_]
+    return all_outputs[:, seq_in_idx_:]
+
+
 def comp_model_measure(
     *,
     model: HookedTransformer,
@@ -144,21 +136,6 @@ def comp_model_measure(
         select_seq = True
     else:
         raise ValueError()
-
-    def get_outputs(
-        abl_resid_acts: Float[torch.Tensor, "batch seq model"],
-        act_vec: Float[torch.Tensor, "model"],
-        seq_in_idx_: Int[torch.Tensor, "batch"] | int,
-        seq_out_idx_: Optional[Int[torch.Tensor, "batch"]],
-    ):
-        resid_acts = abl_resid_acts.clone()
-        resid_acts[:, seq_in_idx_] += act_vec
-        all_outputs = model(
-            resid_acts, start_at_layer=start_at_layer, stop_at_layer=stop_at_layer
-        )
-        if select_seq:
-            return all_outputs[:, seq_out_idx_]
-        return all_outputs[:, seq_in_idx_:]
 
     def compute(measure_slice, abl_resid_acts, seq_in_idx_, seq_out_idx_=None):
         if isinstance(seq_in_idx_, int):
@@ -200,113 +177,15 @@ def comp_model_measure(
     return measure
 
 
-@dataclass(kw_only=True)
-class ExperimentContext:
-    model: HookedTransformer
-    layer: int
-    input_ids: Int[torch.Tensor, "prompt seq"]
-    acts_q_range: tuple[float, float]
-    batch_size: int
-    resid_acts: Float[torch.Tensor, "prompt seq model"] = field(init=False)
-
-    def __post_init__(self):
-        self.resid_acts = get_clean_resid_acts(
-            self.model, self.layer, self.input_ids, self.batch_size
-        )
-
-    def get_svd_dirs(self):
-        _u, _s, vh = torch.linalg.svd(
-            self.resid_acts.view(-1, self.d_model), full_matrices=False
-        )
-        return vh.T
-
-    @property
-    def d_model(self):
-        return self.model.cfg.d_model
+def get_all_model_output(model, start_at_layer, stop_at_layer, abl_resid_acts, act_vec):
+    resid_acts = abl_resid_acts + act_vec
+    return model(resid_acts, start_at_layer=start_at_layer, stop_at_layer=stop_at_layer)
 
 
-@dataclass
-class Measure:
-    stop_at_layer: Optional[int]
-    measure_fn: Callable[
-        [
-            Float[torch.Tensor, "prompt seq_ output"],
-            Float[torch.Tensor, "prompt seq_ output"],
-        ],
-        Float[torch.Tensor, "prompt seq_"],
-    ]
-    symmetric: bool
-
-
-class Direction:
-    def __init__(self, dir: Float[torch.Tensor, "model"], exctx: ExperimentContext):
-        self.dir = dir
-        self.exctx = exctx
-        self.dir_acts = compute_dir_acts(dir, exctx.resid_acts)
-        self.act_min, self.act_max = get_act_range(self.dir_acts, *exctx.acts_q_range)
-
-    def __hash__(self):
-        return hash(self.dir)
-
-    def __eq__(self, other):
-        return self.dir is other.dir
-
-    def compute_min_max_measure(
-        self, measure: Measure
-    ) -> Float[torch.Tensor, "prompt seq seq"]:
-        act_fracs = torch.tensor([0.0, 1.0])
-        all_measure = self.act_fracs_to_measure(act_fracs=act_fracs, measure=measure)
-        return (all_measure[0, 1] + all_measure[1, 0]) / 2
-
-    def act_fracs_to_measure(
-        self,
-        *,
-        act_fracs: Float[torch.Tensor, "act"],
-        measure: Measure,
-        prompt_idx: Optional[Int[torch.Tensor, "prompt"]] = None,
-        seq_out_idx: Optional[Int[torch.Tensor, "prompt"]] = None,
-    ) -> Float[torch.Tensor, "act act prompt seq #seq"]:
-        act_vals = self.act_min + act_fracs * (self.act_max - self.act_min)
-        if prompt_idx is None:
-            resid_acts = self.exctx.resid_acts
-            dir_acts = self.dir_acts
-        else:
-            resid_acts = self.exctx.resid_acts[prompt_idx]
-            dir_acts = self.dir_acts[prompt_idx]
-        abl_resid_acts = ablate_dir(resid_acts, self.dir, dir_acts)
-        act_vecs = get_act_vec(
-            act_vals=act_vals,
-            dir=self.dir,
-        )
-        n_prompt, n_seq = resid_acts.shape[:2]
-        n_act = act_fracs.shape[0]
-        ret = torch.empty(
-            n_act, n_act, n_prompt, n_seq, 1 if seq_out_idx is None else n_seq
-        )
-
-        def comp_measure(i, j):
-            return comp_model_measure(
-                model=self.exctx.model,
-                start_at_layer=self.exctx.layer,
-                stop_at_layer=measure.stop_at_layer,
-                measure_fn=measure.measure_fn,
-                abl_resid_acts=abl_resid_acts,
-                act_vec_a=act_vecs[i],
-                act_vec_b=act_vecs[j],
-                batch_size=self.exctx.batch_size // 2,
-                seq_out_idx=seq_out_idx,
-            )
-
-        if measure.symmetric:
-            for i in range(n_act):
-                ret[i, i] = 0
-                for j in range(i):
-                    ret[i, j] = ret[j, i] = comp_measure(i, j)
-        else:
-            for i in range(n_act):
-                for j in range(n_act):
-                    if i == j:
-                        ret[i, j] = 0
-                        continue
-                    ret[i, j] = comp_measure(i, j)
-        return ret
+def get_selected_model_output(
+    model, start_at_layer, stop_at_layer, abl_resid_acts, act_vec, selected
+):
+    all_output = get_all_model_output(
+        model, start_at_layer, stop_at_layer, abl_resid_acts, act_vec
+    )
+    # prompt_idxs, _seq_in
