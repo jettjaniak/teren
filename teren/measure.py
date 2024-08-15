@@ -1,7 +1,6 @@
 import math
 
 from teren.typing import *
-from teren.typing import Float, torch
 
 
 @dataclass(eq=True, unsafe_hash=True)
@@ -15,9 +14,12 @@ class Measure:
         Float[torch.Tensor, "prompt seq_"],
     ]
     symmetric: bool
-    batch_frac: float
     thresh: float
     range: tuple[float, float]
+
+    @property
+    def batch_frac(self) -> float:
+        return 0.5 if self.stop_at_layer is None else 1.0
 
 
 LOG2E = math.log2(math.e)
@@ -48,11 +50,13 @@ def comp_js_dist(
     return divergence.sqrt()
 
 
+# TODO: L2, CE
+
+
 jsd_measure = Measure(
     measure_fn=comp_js_dist,
     stop_at_layer=None,
     symmetric=True,
-    batch_frac=0.4,
     thresh=0.1,
     range=(0.0, 1.0),
 )

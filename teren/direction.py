@@ -1,10 +1,4 @@
-from teren.dir_act_utils import (
-    ablate_dir,
-    comp_model_measure,
-    compute_dir_acts,
-    get_act_range,
-    get_act_vec,
-)
+from teren.dir_act_utils import ablate_dir, compute_dir_acts, get_act_range, get_act_vec
 from teren.experiment_context import ExperimentContext
 from teren.measure import Measure
 from teren.typing import *
@@ -79,25 +73,23 @@ class Direction:
         act_vec_b: Float[torch.Tensor, "model"],
     ) -> Float[torch.Tensor, "prompt seq seq"]:
         """Calculate measure for all (prompt, seq_in, seq_out)"""
+
+        def get_model_output(act_vec):
+            resid_acts = b_abl_resid_acts.clone()
+            resid_acts[:, si] += act_vec
+            return self.exctx.model(
+                resid_acts,
+                start_at_layer=self.exctx.layer,
+                stop_at_layer=measure.stop_at_layer,
+            )
+
         bs = int(self.exctx.batch_size * measure.batch_frac)
         ret = torch.empty((self.exctx.n_prompts, self.exctx.n_seq, self.exctx.n_seq))
         for si in range(self.exctx.n_seq):
             for i in range(0, self.exctx.n_prompts, bs):
                 b_abl_resid_acts = self.abl_resid_acts[i : i + bs]
-                b_resid_acts_a = b_abl_resid_acts.clone()
-                b_resid_acts_a[:, si] += act_vec_a
-                b_resid_acts_b = b_abl_resid_acts.clone()
-                b_resid_acts_b[:, si] += act_vec_b
-                output_a = self.exctx.model(
-                    b_resid_acts_a,
-                    start_at_layer=self.exctx.layer,
-                    stop_at_layer=measure.stop_at_layer,
-                )
-                output_b = self.exctx.model(
-                    b_resid_acts_b,
-                    start_at_layer=self.exctx.layer,
-                    stop_at_layer=measure.stop_at_layer,
-                )
+                output_a = get_model_output(act_vec_a)
+                output_b = get_model_output(act_vec_b)
                 ret[i : i + bs, si] = measure.measure_fn(output_a, output_b)
         return ret
 
@@ -109,6 +101,16 @@ class Direction:
         act_vec_b: Float[torch.Tensor, "model"],
     ) -> Float[torch.Tensor, "selected"]:
         """Calculate measure for selected (prompt, seq_in, seq_out)"""
+
+        def get_model_output(act_vec):
+            resid_acts = b_abl_resid_acts.clone()
+            resid_acts[prompt_arange, b_s_seq_in] += act_vec
+            return self.exctx.model(
+                resid_acts,
+                start_at_layer=self.exctx.layer,
+                stop_at_layer=measure.stop_at_layer,
+            )[prompt_arange, b_s_seq_out]
+
         measurements = self.measurements_by_measure[measure]
         s_prompt, s_seq_in, s_seq_out = measurements.selected.T
         n_selected = s_prompt.shape[0]
@@ -116,23 +118,12 @@ class Direction:
         ret = torch.empty(n_selected)
         for i in range(0, n_selected, bs):
             b_s_prompt = s_prompt[i : i + bs]
+            prompt_arange = torch.arange(b_s_prompt.shape[0])
             b_s_seq_in = s_seq_in[i : i + bs]
             b_s_seq_out = s_seq_out[i : i + bs]
             b_abl_resid_acts = self.abl_resid_acts[b_s_prompt]
-            b_resid_acts_a = b_abl_resid_acts.clone()
-            b_resid_acts_a[torch.arange(n_selected), b_s_seq_in] += act_vec_a
-            output_a = self.exctx.model(
-                b_resid_acts_a,
-                start_at_layer=self.exctx.layer,
-                stop_at_layer=measure.stop_at_layer,
-            )[torch.arange(n_selected), b_s_seq_out]
-            b_resid_acts_b = b_abl_resid_acts.clone()
-            b_resid_acts_b[torch.arange(n_selected), b_s_seq_in] += act_vec_b
-            output_b = self.exctx.model(
-                b_resid_acts_b,
-                start_at_layer=self.exctx.layer,
-                stop_at_layer=measure.stop_at_layer,
-            )[torch.arange(n_selected), b_s_seq_out]
+            output_a = get_model_output(act_vec_a)
+            output_b = get_model_output(act_vec_b)
             ret[i : i + bs] = measure.measure_fn(output_a, output_b)
         return ret
 
