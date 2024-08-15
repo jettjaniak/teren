@@ -107,66 +107,68 @@ class Direction:
         measure: Measure,
         act_vec_a: Float[torch.Tensor, "model"],
         act_vec_b: Float[torch.Tensor, "model"],
-        selected: Int[torch.Tensor, "selected 3"],
     ) -> Float[torch.Tensor, "selected"]:
-        n_selected = selected.shape[0]
+        """Calculate measure for selected (prompt, seq_in, seq_out)"""
+        measurements = self.measurements_by_measure[measure]
+        s_prompt, s_seq_in, s_seq_out = measurements.selected.T
+        n_selected = s_prompt.shape[0]
         bs = int(self.exctx.batch_size * measure.batch_frac)
+        ret = torch.empty(n_selected)
         for i in range(0, n_selected, bs):
-            b_selected = selected[i : i + bs]
-            b_prompt_idxs, b_seq_in_idxs, b_seq_out_idxs = b_selected.T
-            b_abl_resid_acts = self.abl_resid_acts[b_prompt_idxs]
-            b_resid_acts_a = b_abl_resid_acts + act_vec_a
-            b_resid_acts_b = b_abl_resid_acts + act_vec_b
+            b_s_prompt = s_prompt[i : i + bs]
+            b_s_seq_in = s_seq_in[i : i + bs]
+            b_s_seq_out = s_seq_out[i : i + bs]
+            b_abl_resid_acts = self.abl_resid_acts[b_s_prompt]
+            b_resid_acts_a = b_abl_resid_acts.clone()
+            b_resid_acts_a[torch.arange(n_selected), b_s_seq_in] += act_vec_a
+            output_a = self.exctx.model(
+                b_resid_acts_a,
+                start_at_layer=self.exctx.layer,
+                stop_at_layer=measure.stop_at_layer,
+            )[torch.arange(n_selected), b_s_seq_out]
+            b_resid_acts_b = b_abl_resid_acts.clone()
+            b_resid_acts_b[torch.arange(n_selected), b_s_seq_in] += act_vec_b
+            output_b = self.exctx.model(
+                b_resid_acts_b,
+                start_at_layer=self.exctx.layer,
+                stop_at_layer=measure.stop_at_layer,
+            )[torch.arange(n_selected), b_s_seq_out]
+            ret[i : i + bs] = measure.measure_fn(output_a, output_b)
+        return ret
 
-    def act_fracs_to_measure(
+    def act_matrix_measure(
         self,
         *,
-        act_fracs: Float[torch.Tensor, "act"],
+        n_act: int,
         measure: Measure,
-        prompt_idx: Optional[Int[torch.Tensor, "prompt"]] = None,
-        seq_out_idx: Optional[Int[torch.Tensor, "prompt"]] = None,
-    ) -> Float[torch.Tensor, "act act prompt seq #seq"]:
+    ) -> Float[torch.Tensor, "act act selected"]:
+        """Calculate measure for all pairs of act vectors"""
+        act_fracs = torch.linspace(self.act_min, self.act_max, n_act)
         act_vals = self.act_min + act_fracs * (self.act_max - self.act_min)
-        if prompt_idx is None:
-            resid_acts = self.exctx.resid_acts
-            dir_acts = self.dir_acts
-        else:
-            resid_acts = self.exctx.resid_acts[prompt_idx]
-            dir_acts = self.dir_acts[prompt_idx]
-        abl_resid_acts = ablate_dir(resid_acts, self.dir, dir_acts)
         act_vecs = get_act_vec(
             act_vals=act_vals,
             dir=self.dir,
         )
-        n_prompt, n_seq = resid_acts.shape[:2]
-        n_act = act_fracs.shape[0]
-        ret = torch.empty(
-            n_act, n_act, n_prompt, n_seq, 1 if seq_out_idx is None else n_seq
-        )
+        measurements = self.measurements_by_measure[measure]
+        n_selected = measurements.selected.shape[0]
+        ret = torch.empty(n_act, n_act, n_selected)
 
-        def comp_measure(i, j):
-            return comp_model_measure(
-                model=self.exctx.model,
-                start_at_layer=self.exctx.layer,
-                stop_at_layer=measure.stop_at_layer,
-                measure_fn=measure.measure_fn,
-                abl_resid_acts=abl_resid_acts,
-                act_vec_a=act_vecs[i],
-                act_vec_b=act_vecs[j],
-                batch_size=self.exctx.batch_size // 2,
-                seq_out_idx=seq_out_idx,
-            )
-
-        if measure.symmetric:
-            for i in range(n_act):
-                ret[i, i] = 0
+        for i in range(n_act):
+            ret[i, i] = 0
+            if measure.symmetric:
                 for j in range(i):
-                    ret[i, j] = ret[j, i] = comp_measure(i, j)
-        else:
-            for i in range(n_act):
+                    ret[i, j] = ret[j, i] = self.compute_measure_selected(
+                        measure=measure,
+                        act_vec_a=act_vecs[i],
+                        act_vec_b=act_vecs[j],
+                    )
+            else:
                 for j in range(n_act):
                     if i == j:
-                        ret[i, j] = 0
                         continue
-                    ret[i, j] = comp_measure(i, j)
+                    ret[i, j] = self.compute_measure_selected(
+                        measure=measure,
+                        act_vec_a=act_vecs[i],
+                        act_vec_b=act_vecs[j],
+                    )
         return ret

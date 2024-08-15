@@ -52,7 +52,7 @@ jsd_measure = Measure(
     measure_fn=comp_js_dist,
     stop_at_layer=None,
     symmetric=True,
-    batch_frac=0.5,
+    batch_frac=0.4,
     thresh=0.1,
     range=(0.0, 1.0),
 )
