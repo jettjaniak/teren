@@ -4,7 +4,7 @@ from teren.typing import *
 from teren.typing import Float, torch
 
 
-@dataclass
+@dataclass(eq=True, unsafe_hash=True)
 class Measure:
     stop_at_layer: Optional[int]
     measure_fn: Callable[

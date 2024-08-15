@@ -54,7 +54,6 @@ class Direction:
         # measure_val is (prompt, seq_in, seq_out)
         return measure_val.max(dim=-1)
 
-    # TODO: name
     def process_measure(self, measure: Measure):
         # both (prompt, seq_in)
         all_values, all_seq_out_idx = self.compute_min_max_measure_all(measure)
@@ -63,7 +62,7 @@ class Direction:
         # each row is (prompt_idx, seq_in_idx)
         sel_prompt_seq_in_idx = torch.nonzero(thresh_mask)
         # shape is (num_above_thresh,)
-        sel_seq_out_idx = all_seq_out_idx[sel_prompt_seq_in_idx]
+        sel_seq_out_idx = all_seq_out_idx[thresh_mask]
         selected = torch.cat(
             [sel_prompt_seq_in_idx, sel_seq_out_idx.unsqueeze(1)], dim=1
         )
