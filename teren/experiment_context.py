@@ -12,9 +12,10 @@ class ExperimentContext:
     layer: int
     input_ids: Int[torch.Tensor, "prompt seq"]
     acts_q_range: tuple[float, float]
+    n_act: int
     batch_size: int
     resid_acts: Float[torch.Tensor, "prompt seq model"] = field(init=False)
-    histogram_bins: int = 500
+    mm_hist_bins: int = 500
 
     def __post_init__(self):
         self.resid_acts = get_clean_resid_acts(

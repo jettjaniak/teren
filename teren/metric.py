@@ -4,7 +4,7 @@ from teren.typing import *
 
 
 @dataclass(eq=True, unsafe_hash=True)
-class Measure:
+class Metric:
     stop_at_layer: Optional[int]
     measure_fn: Callable[
         [
@@ -53,7 +53,7 @@ def comp_js_dist(
 # TODO: L2, CE
 
 
-jsd_measure = Measure(
+jsd_metric = Metric(
     measure_fn=comp_js_dist,
     stop_at_layer=None,
     symmetric=True,

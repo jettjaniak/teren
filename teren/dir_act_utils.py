@@ -7,7 +7,6 @@ from teren.typing import *
 
 
 def get_input_ids(chunk: int, seq_len: int) -> Int[torch.Tensor, "prompt seq"]:
-    # TODO seed
     dataset = load_dataset(
         "apollo-research/Skylion007-openwebtext-tokenizer-gpt2",
         data_files=f"data/train-{chunk:05}-of-00073.parquet",
@@ -17,7 +16,8 @@ def get_input_ids(chunk: int, seq_len: int) -> Int[torch.Tensor, "prompt seq"]:
     dataset = cast(Dataset, dataset)
     dataset.set_format(type="torch")
     input_ids = cast(torch.Tensor, dataset["input_ids"])
-    return input_ids.view(-1, seq_len)
+    input_ids = input_ids.view(-1, seq_len)
+    return input_ids[torch.randperm(input_ids.shape[0])]
 
 
 def get_clean_resid_acts(
@@ -88,44 +88,44 @@ def compute_single_convex_score(
     # area under line
     aul = abs(mid - i) * met / 2
     # avoid div by 0
-    ratio = torch.ones_like(auc)
+    score = torch.zeros_like(auc)
     mask = (auc > 0) & (aul > 0)
-    ratio[mask] = auc[mask] / aul[mask]
-    return met, auc, ratio
+    score[mask] += 1 - auc[mask] / aul[mask]
+    return met, auc, score
 
 
-def compute_one_side_min_convex_score(
+def compute_one_side_max_convex_score(
     n_sel: int,
     mid: int,
     matmet: Float[torch.Tensor, "act act sel"],
-    min_ratio: Float[torch.Tensor, "sel"],
+    max_score: Float[torch.Tensor, "sel"],
     it: range,
 ) -> Float[torch.Tensor, "sel"]:
     auc = torch.zeros(n_sel)
     prev_met = torch.zeros(n_sel)
     for i in it:
-        prev_met, auc, ratio = compute_single_convex_score(
+        prev_met, auc, score = compute_single_convex_score(
             mid, i, matmet, prev_met, auc
         )
-        min_ratio = torch.minimum(min_ratio, ratio)
-    return min_ratio
+        max_score = torch.maximum(max_score, score)
+    return max_score
 
 
-def compute_min_convex_scores(
+def compute_max_convex_scores(
     matmet: Float[torch.Tensor, "act act sel"],
 ) -> tuple[Float[torch.Tensor, "sel"], Int[torch.Tensor, "sel"]]:
     """Returns min scores and corresponding idx of act level A"""
     n_act, n_sel = matmet.shape[1:]
-    min_ratios = torch.empty(n_act, n_sel)
+    max_scores = torch.empty(n_act, n_sel)
     for mid in range(n_act):
-        min_ratio = torch.full((n_sel,), float("inf"))
+        max_score = torch.full((n_sel,), -float("inf"))
         # from mid to left
-        min_ratio = compute_one_side_min_convex_score(
-            n_sel, mid, matmet, min_ratio, it=range(mid - 1, -1, -1)
+        max_score = compute_one_side_max_convex_score(
+            n_sel, mid, matmet, max_score, it=range(mid - 1, -1, -1)
         )
         # from mid to right
-        min_ratio = compute_one_side_min_convex_score(
-            n_sel, mid, matmet, min_ratio, it=range(mid + 1, n_act)
+        max_score = compute_one_side_max_convex_score(
+            n_sel, mid, matmet, max_score, it=range(mid + 1, n_act)
         )
-        min_ratios[mid] = min_ratio
-    return min_ratios.min(0)
+        max_scores[mid] = max_score
+    return max_scores.max(0)
