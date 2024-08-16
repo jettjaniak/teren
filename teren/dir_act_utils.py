@@ -69,3 +69,63 @@ def get_act_vec(
     dir: Float[torch.Tensor, "model"],
 ) -> Float[torch.Tensor, "act model"]:
     return einsum("act, model -> act model", act_vals, dir)
+
+
+def compute_single_convex_score(
+    mid: int,
+    i: int,
+    matmet: Float[torch.Tensor, "act act sel"],
+    prev_met: Float[torch.Tensor, "sel"],
+    auc: Float[torch.Tensor, "sel"],
+) -> tuple[
+    Float[torch.Tensor, "sel"],
+    Float[torch.Tensor, "sel"],
+    Float[torch.Tensor, "sel"],
+]:
+    met = matmet[mid, i]
+    # area under curve
+    auc += (met + prev_met) / 2
+    # area under line
+    aul = abs(mid - i) * met / 2
+    # avoid div by 0
+    ratio = torch.ones_like(auc)
+    mask = (auc > 0) & (aul > 0)
+    ratio[mask] = auc[mask] / aul[mask]
+    return met, auc, ratio
+
+
+def compute_one_side_min_convex_score(
+    n_sel: int,
+    mid: int,
+    matmet: Float[torch.Tensor, "act act sel"],
+    min_ratio: Float[torch.Tensor, "sel"],
+    it: range,
+) -> Float[torch.Tensor, "sel"]:
+    auc = torch.zeros(n_sel)
+    prev_met = torch.zeros(n_sel)
+    for i in it:
+        prev_met, auc, ratio = compute_single_convex_score(
+            mid, i, matmet, prev_met, auc
+        )
+        min_ratio = torch.minimum(min_ratio, ratio)
+    return min_ratio
+
+
+def compute_min_convex_scores(
+    matmet: Float[torch.Tensor, "act act sel"],
+) -> tuple[Float[torch.Tensor, "sel"], Int[torch.Tensor, "sel"]]:
+    """Returns min scores and corresponding idx of act level A"""
+    n_act, n_sel = matmet.shape[1:]
+    min_ratios = torch.empty(n_act, n_sel)
+    for mid in range(n_act):
+        min_ratio = torch.full((n_sel,), float("inf"))
+        # from mid to left
+        min_ratio = compute_one_side_min_convex_score(
+            n_sel, mid, matmet, min_ratio, it=range(mid - 1, -1, -1)
+        )
+        # from mid to right
+        min_ratio = compute_one_side_min_convex_score(
+            n_sel, mid, matmet, min_ratio, it=range(mid + 1, n_act)
+        )
+        min_ratios[mid] = min_ratio
+    return min_ratios.min(0)
