@@ -8,10 +8,10 @@ class Metric:
     stop_at_layer: Optional[int]
     measure_fn: Callable[
         [
-            Float[torch.Tensor, "prompt seq_ output"],
-            Float[torch.Tensor, "prompt seq_ output"],
+            Float[torch.Tensor, "prompt output"],
+            Float[torch.Tensor, "prompt output"],
         ],
-        Float[torch.Tensor, "prompt seq_"],
+        Float[torch.Tensor, "prompt"],
     ]
     symmetric: bool
     thresh: float

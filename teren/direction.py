@@ -16,7 +16,7 @@ from teren.typing import *
 class MetricResults:
     mm_hist: Float[torch.Tensor, "bins"] | None = None
     # prompt, seq_in, seq_out
-    mm_sel: Int[torch.Tensor, "sel 3"] | None = None
+    mm_sel: Int[torch.Tensor, "sel"] | None = None
     cvx_score: Float[torch.Tensor, "sel"] | None = None
     # idx of act A that has the lowest convex score
     cvx_act: Int[torch.Tensor, "sel"] | None = None
@@ -39,10 +39,10 @@ class Direction:
 
     def compute_min_max_metric_all(
         self, metric: Metric
-    ) -> tuple[Float[torch.Tensor, "prompt seq"], Int[torch.Tensor, "prompt seq"]]:
+    ) -> Float[torch.Tensor, "prompt"]:
         """Measure charge from min to max act
 
-        For each seq_in pick seq_out with highest value
+        Always patching and measuring at last seq position
         """
         act_vec_0 = self.dir * self.act_min
         act_vec_1 = self.dir * self.act_max
@@ -50,25 +50,19 @@ class Direction:
             metric=metric, act_vec_a=act_vec_0, act_vec_b=act_vec_1
         )
         if metric.symmetric:
-            metric_val = metric_01
-        else:
-            metric_10 = self.compute_metric_all(
-                metric=metric, act_vec_a=act_vec_1, act_vec_b=act_vec_0
-            )
-            metric_val = (metric_01 + metric_10) / 2
-        # metric_val is (prompt, seq_in, seq_out)
-        return metric_val.max(dim=-1)
+            return metric_01
+        metric_10 = self.compute_metric_all(
+            metric=metric, act_vec_a=act_vec_1, act_vec_b=act_vec_0
+        )
+        return (metric_01 + metric_10) / 2
 
     def process_metric_mm(self, metric: Metric):
-        # both (prompt, seq_in)
-        all_values, all_seq_out_idx = self.compute_min_max_metric_all(metric)
+        # (prompt,)
+        all_values = self.compute_min_max_metric_all(metric)
         thresh_mask = all_values > metric.thresh
-        # shape is (num_above_thresh, 2)
-        # each row is (prompt_idx, seq_in_idx)
-        sel_prompt_seq_in_idx = torch.nonzero(thresh_mask)
-        # shape is (num_above_thresh,)
-        sel_seq_out_idx = all_seq_out_idx[thresh_mask]
-        sel = torch.cat([sel_prompt_seq_in_idx, sel_seq_out_idx.unsqueeze(1)], dim=1)
+        # shape is (num_above_thresh, 1)
+        # each row is (prompt_idx,)
+        sel = torch.nonzero(thresh_mask).squeeze()
         hist = torch.histogram(
             all_values, bins=self.exctx.mm_hist_bins, range=metric.range
         )[0]
@@ -88,32 +82,31 @@ class Direction:
         metric: Metric,
         act_vec_a: Float[torch.Tensor, "model"],
         act_vec_b: Float[torch.Tensor, "model"],
-    ) -> Float[torch.Tensor, "prompt seq seq"]:
-        """Calculate metric for all (prompt, seq_in, seq_out)"""
+    ) -> Float[torch.Tensor, "prompt"]:
+        """Calculate metric while patching and measuring at last seq position"""
 
         def get_model_output(act_vec):
             resid_acts = b_abl_resid_acts.clone()
-            resid_acts[:, si] += act_vec
+            resid_acts[:, -1] += act_vec
             return self.exctx.model(
                 resid_acts,
                 start_at_layer=self.exctx.layer,
                 stop_at_layer=metric.stop_at_layer,
-            )
+            )[:, -1]
 
         bs = int(self.exctx.batch_size * metric.batch_frac)
-        ret = torch.empty((self.exctx.n_prompts, self.exctx.n_seq, self.exctx.n_seq))
-        for si in range(self.exctx.n_seq):
-            for i in range(0, self.exctx.n_prompts, bs):
-                b_abl_resid_acts = self.abl_resid_acts[i : i + bs]
-                output_a = get_model_output(act_vec_a)
-                output_b = get_model_output(act_vec_b)
-                ret[i : i + bs, si] = metric.measure_fn(output_a, output_b)
+        ret = torch.empty(self.exctx.n_prompts)
+        for i in range(0, self.exctx.n_prompts, bs):
+            b_abl_resid_acts = self.abl_resid_acts[i : i + bs]
+            output_a = get_model_output(act_vec_a)
+            output_b = get_model_output(act_vec_b)
+            ret[i : i + bs] = metric.measure_fn(output_a, output_b)
         return ret
 
     def compute_measure_sel(
         self,
         *,
-        measure: Metric,
+        metric: Metric,
         act_vec_a: Float[torch.Tensor, "model"],
         act_vec_b: Float[torch.Tensor, "model"],
     ) -> Float[torch.Tensor, "sel"]:
@@ -121,27 +114,23 @@ class Direction:
 
         def get_model_output(act_vec):
             resid_acts = b_abl_resid_acts.clone()
-            resid_acts[prompt_arange, b_s_seq_in] += act_vec
+            resid_acts[:, -1] += act_vec
             return self.exctx.model(
                 resid_acts,
                 start_at_layer=self.exctx.layer,
-                stop_at_layer=measure.stop_at_layer,
-            )[prompt_arange, b_s_seq_out]
+                stop_at_layer=metric.stop_at_layer,
+            )[:, -1]
 
-        measurements = self.res_by_metric[measure]
-        s_prompt, s_seq_in, s_seq_out = measurements.mm_sel.T  # type: ignore
-        n_sel = s_prompt.shape[0]
-        bs = int(self.exctx.batch_size * measure.batch_frac)
+        sel = self.res_by_metric[metric].mm_sel
+        n_sel = sel.shape[0]  # type: ignore
+        bs = int(self.exctx.batch_size * metric.batch_frac)
         ret = torch.empty(n_sel)
         for i in range(0, n_sel, bs):
-            b_s_prompt = s_prompt[i : i + bs]
-            prompt_arange = torch.arange(b_s_prompt.shape[0])
-            b_s_seq_in = s_seq_in[i : i + bs]
-            b_s_seq_out = s_seq_out[i : i + bs]
-            b_abl_resid_acts = self.abl_resid_acts[b_s_prompt]
+            b_sel = sel[i : i + bs]  # type: ignore
+            b_abl_resid_acts = self.abl_resid_acts[b_sel]
             output_a = get_model_output(act_vec_a)
             output_b = get_model_output(act_vec_b)
-            ret[i : i + bs] = measure.measure_fn(output_a, output_b)
+            ret[i : i + bs] = metric.measure_fn(output_a, output_b)
         return ret
 
     def compute_matmet(self, metric: Metric) -> Float[torch.Tensor, "act act sel"]:
@@ -153,8 +142,8 @@ class Direction:
             act_vals=act_vals,
             dir=self.dir,
         )
-        measurements = self.res_by_metric[metric]
-        n_sel = measurements.mm_sel.shape[0]  # type: ignore
+        res = self.res_by_metric[metric]
+        n_sel = res.mm_sel.shape[0]  # type: ignore
         ret = torch.empty(n_act, n_act, n_sel)
 
         for i in range(n_act):
@@ -162,7 +151,7 @@ class Direction:
             if metric.symmetric:
                 for j in range(i):
                     ret[i, j] = ret[j, i] = self.compute_measure_sel(
-                        measure=metric,
+                        metric=metric,
                         act_vec_a=act_vecs[i],
                         act_vec_b=act_vecs[j],
                     )
@@ -171,7 +160,7 @@ class Direction:
                     if i == j:
                         continue
                     ret[i, j] = self.compute_measure_sel(
-                        measure=metric,
+                        metric=metric,
                         act_vec_a=act_vecs[i],
                         act_vec_b=act_vecs[j],
                     )
