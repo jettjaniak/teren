@@ -22,23 +22,27 @@ from transformer_lens import HookedTransformer
 n_ctx = 10
 perturbation_layer_number = 0
 perturbation_layer = f"blocks.{perturbation_layer_number}.hook_resid_pre"
-seed = 3
+seed = 688
 dataloader_batch_size = 15
 perturbation_pos = slice(-1, None, 1)
 read_layer = "blocks.11.hook_resid_post"
 perturbation_range = (0.0, 1.0)  # (0.0, np.pi)
 n_steps = 100
-mean_batch_size = 100
+mean_batch_size = 300
 sae_threshold = 0.05  # 0.05
 
-NORMALIZE = True
-MEAN_NORMALIZE = True
-ADDITIVE_PERTURBATION = False
+NORMALIZE = False
+if NORMALIZE:
+    MEAN_NORMALIZE = True
+# ADDITIVE_PERTURBATION = False #TODO: change back
+additive_perturbation = False
+# if additive_perturbation: #TODO: change back
+ADDITIVE_ORIGIN = True
 
-R_OTHER = False
+R_OTHER = True
 RANDOM = False
 PREDEFINED_OTHER = False
-LAST_TOKEN = True
+LAST_TOKEN = False
 ACTIVATE_SAE_FEATURE = False
 DAMPEN_FEATURE = False
 
@@ -85,6 +89,7 @@ perturbations_only_max_values = {key: [] for key in keys}
 
 perturbations_cache = {key: [] for key in keys}
 r_other_act = []
+r_other_prompt = []
 # tensor([[3513,  553,  262, 8009,  531,   13,  198,  198, 1858,  547]]) base_ref.prompt, seed = 6
 ###############################################
 
@@ -152,6 +157,9 @@ def get_random_activation(
 ) -> torch.Tensor:
     """Get a random activation from the dataset."""
     rand_prompt = generate_prompt(dataset, n_ctx=n_ctx)
+    # TODO: change back
+    read_prompt = torch.Tensor([22473, 286, 852, 257, 3222, 475, 318, 318, 534, 848])
+    r_other_prompt.append(rand_prompt)
     logits, cache = model.run_with_cache(rand_prompt)
     ret = cache[layer][:, pos, :].to("cpu").detach()
     return ret
@@ -219,7 +227,7 @@ class RandomPerturbation(Perturbation):
 
     def generate(self, resid_acts):
         target = self.distrib.sample(resid_acts.shape[:-1])
-        if ADDITIVE_PERTURBATION:
+        if additive_perturbation:
             return target
         else:
             return target - resid_acts
@@ -243,7 +251,7 @@ class RandomActivationPerturbation(Perturbation):
         )
         if CACHE:
             r_other_act.append(target)
-        if ADDITIVE_PERTURBATION:
+        if additive_perturbation:
             return target
         else:
             return target - resid_acts
@@ -272,7 +280,7 @@ class PredefinedActivationPerturbation(Perturbation):
         )
         self.count += 1
 
-        if ADDITIVE_PERTURBATION:
+        if additive_perturbation:
             return target
         else:
             return target - resid_acts
@@ -292,7 +300,7 @@ class ActivateSAEFeaturePerturbation(Perturbation):
         target = self.targets[self.count]
         self.count += 1
 
-        if ADDITIVE_PERTURBATION:
+        if additive_perturbation:
             return target.unsqueeze(0).unsqueeze(0)
         else:
             return target - resid_acts
@@ -315,7 +323,7 @@ class DampeningPerturbation(Perturbation):
         # if CACHE:  # TODO: FIX THIS, using r-other is hacky
         # r_other_act.append(target)
 
-        if ADDITIVE_PERTURBATION:
+        if additive_perturbation:
             return target
         else:
             return target - resid_acts
@@ -339,7 +347,7 @@ class LastTokenPerturbation(Perturbation):
         )
         if CACHE:
             r_other_act.append(target)
-        if ADDITIVE_PERTURBATION:
+        if additive_perturbation:
             return target
         else:
             return target - resid_acts
@@ -391,10 +399,11 @@ def scan(
     activations: Float[torch.Tensor, "... n_ctx d_model"],
     n_steps: int,
     range: tuple[float, float],
-    sae=None,
+    sae,
 ) -> Float[torch.Tensor, "... n_steps 1 d_model"]:
     direction = perturbation(activations)
-
+    if additive_perturbation and ADDITIVE_ORIGIN:
+        direction = direction - sae.b_dec
     if NORMALIZE:
         if MEAN_NORMALIZE:
             direction -= torch.mean(direction, dim=-1, keepdim=True)
@@ -527,7 +536,9 @@ dataloader = torch.utils.data.DataLoader(  # type: ignore
 
 # %%
 
+# model = HookedTransformer.from_pretrained("gpt2", center_writing_weights=False)
 model = HookedTransformer.from_pretrained("gpt2")
+
 device = get_device_str()
 
 print(device)
@@ -592,13 +603,14 @@ if RANDOM or PREDEFINED_OTHER:
     batch_of_prompts = generate_prompt(dataset, n_ctx=n_ctx, batch=mean_batch_size)
     batch_act_cache = model.run_with_cache(batch_of_prompts)[1].to("cpu")
     data = batch_act_cache[perturbation_layer][:, perturbation_pos, :].squeeze(1)
-    print(data.shape)
+    print(f"batch data shape: {data.shape}")
+
+if RANDOM:
     data_mean = data.mean(dim=0, keepdim=True)
     data_cov = (
         torch.einsum("i j, i k -> j k", data - data_mean, data - data_mean)
         / data.shape[0]
     )
-
     if not is_positive_definite(data_cov):
         print("data_cov is not positive definite, need to alter it slightly")
         data_cov = nearest_positive_definite(data_cov)
@@ -606,36 +618,62 @@ if RANDOM or PREDEFINED_OTHER:
 
 # %%
 if PREDEFINED_OTHER:
-    A_origin = base_ref.act.squeeze(0).squeeze(0) - sae.b_dec
-    ordering_metric = []
-    if ADDITIVE_PERTURBATION:
-        predefined_other_metric = "dot product"
-    else:
-        predefined_other_metric = "cosine similarity"
-
-    if ADDITIVE_PERTURBATION:
-        for t in data:
-            t_origin = t - sae.b_dec
-            ordering_metric.append(A_origin.dot(t_origin).abs().item())
-            sorted_indices = np.argsort(ordering_metric)
-            ret_indices = sorted_indices[:10]
-    else:
-        for t in data:
-            t_origin = t - sae.b_dec
-            ordering_metric.append(cosine_similarity(A_origin, t_origin))
-        sorted_indices = np.argsort(ordering_metric)[::-1]
-        sorted_indices = sorted_indices.copy()
-        ret_indices = np.concatenate(
-            (
-                sorted_indices[:5],  # first 5
-                sorted_indices[
-                    len(sorted_indices) // 2 - 2 : len(sorted_indices) // 2 + 3
-                ],  # middle 5
-                sorted_indices[-5:],  # last 5
-            )
+    specific_prompt = True
+    if specific_prompt:
+        predefined_other_prompts = []
+        predefined_other_prompts.append(
+            torch.Tensor([22473, 286, 852, 257, 3222, 475, 318, 318, 534, 848]).long()
         )
-    predefined_other_prompts = batch_of_prompts[ret_indices]
-    chosen_metric = [ordering_metric[i] for i in ret_indices]
+        number_of_prompts_pe = 1
+    else:
+
+        A_origin = base_ref.act.squeeze(0).squeeze(0) - sae.b_dec
+        metrics = []
+        number_of_prompts_pe = 45
+        pe_cos_sim_thres = 0.05
+
+        if additive_perturbation:
+            predefined_other_metric = "cosine similarity"
+        else:
+            predefined_other_metric = "cosine similarity"
+
+        temp_metrics = []
+        if additive_perturbation:
+            topN = True
+            ret_indices = []
+            for i, t in enumerate(data):
+                t_origin = t - sae.b_dec
+                # metrics.append(cosine_similarity(A_origin, t_origin))
+                metrics.append(t_origin.dot(A_origin).abs().item())
+                temp_metrics.append(
+                    cosine_similarity(base_ref.act.squeeze(0).squeeze(0), t)
+                )
+                if len(ret_indices) < number_of_prompts_pe and not topN:
+                    if np.abs(metrics[i]) < pe_cos_sim_thres:
+                        ret_indices.append(len(metrics) - 1)
+            if topN:
+                sorted_indices = np.argsort(metrics)  # [::-1]
+                sorted_indices = sorted_indices.copy()
+                ret_indices = sorted_indices[:number_of_prompts_pe]
+        else:
+            for t in data:
+                t_origin = t - sae.b_dec
+                metrics.append(cosine_similarity(A_origin, t_origin))
+            sorted_indices = np.argsort(metrics)[::-1]
+            sorted_indices = sorted_indices.copy()
+            ret_indices = np.concatenate(
+                (
+                    sorted_indices[:5],  # first 5
+                    sorted_indices[
+                        len(sorted_indices) // 2 - 2 : len(sorted_indices) // 2 + 3
+                    ],  # middle 5
+                    sorted_indices[-5:],  # last 5
+                )
+            )
+        predefined_other_prompts = batch_of_prompts[ret_indices]
+        chosen_metric = [metrics[i] for i in ret_indices]
+
+        assert len(predefined_other_prompts) == number_of_prompts_pe
 
 
 # %%
@@ -681,7 +719,7 @@ def choose_indices(
 ):
     # sorted_indices = sort_indices_by_abs_zero(torch.abs(sae.encode_nonactivation(base_ref.act)[0, -1, :]))  # type: ignore
     # sorted_indices = sort_indices_by_similarity_abs(sims)  # type: ignore
-    if ADDITIVE_PERTURBATION:
+    if additive_perturbation:
         sorted_indices = sort_indices_by_max_orthogonality()
     else:
         sorted_indices = sort_indices_by_similarity(sims)  # type: ignore
@@ -752,7 +790,7 @@ if ACTIVATE_SAE_FEATURE:
     recon_chosen_act = []
     for index in recon_chosen_indices:
         sae_zero[index] = A_encoded_norm
-        if ADDITIVE_PERTURBATION:
+        if additive_perturbation:
             recon_chosen_act.append(sae.decode(sae_zero) - sae.b_dec)
         else:
             t_origin = sae.decode(sae_zero) - sae.b_dec
@@ -854,7 +892,7 @@ if ACTIVATE_SAE_FEATURE:
 # %%
 if DAMPEN_FEATURE:
     dampen_targets = []
-    if ADDITIVE_PERTURBATION:
+    if additive_perturbation:
         full_dampen = -(base_ref.act - sae.b_dec)
         dampen_targets.append(full_dampen)
     else:
@@ -923,7 +961,9 @@ print(f"Allocated: {torch.cuda.memory_allocated() / 1024 ** 3:.2f} GB")
 
 results = defaultdict(list)
 
-loop_len = 10
+loop_len = 1
+if PREDEFINED_OTHER:
+    loop_len = len(predefined_other_prompts)
 
 # for _ in tqdm(range(len(ret_indices))):
 for num_times in tqdm(range(loop_len)):
@@ -942,10 +982,7 @@ for num_times in tqdm(range(loop_len)):
         ):
             continue
 
-        if CACHE:
-            kl_div = run_perturbation(base_ref, perturbation, sae)
-        else:
-            kl_div = run_perturbation(base_ref, perturbation)
+        kl_div = run_perturbation(base_ref, perturbation, sae)
 
         results[name].append(kl_div)
 
@@ -1074,12 +1111,13 @@ def heatmap_activation_evolution(feature_ids, activations, cur_id):
 
 # %%
 def plot_predefined_other(results):
-    first_5_colors = ["red"] * 5
-    second_5_colors = ["green"] * 5
-    last_5_colors = ["blue"] * 5
+    first_5_colors = ["red"] * 15
+    second_5_colors = ["green"] * 15
+    last_5_colors = ["blue"] * 15
+    forth_5_colors = ["purple"] * 15
 
     # Concatenate the lists
-    color_list = first_5_colors + second_5_colors + last_5_colors
+    color_list = first_5_colors + second_5_colors + last_5_colors + forth_5_colors
 
     for perturb_name in results.keys():
         for i, data in enumerate(results[perturb_name]):
@@ -1087,19 +1125,19 @@ def plot_predefined_other(results):
                 # Only label the first line for each perturb_name
                 plt.plot(
                     data,
-                    # color=color_list[i],
-                    label=f"{chosen_metric[i]:.2f}",
+                    color=color_list[i],
+                    # label=f"{chosen_metric[i]:.2f}",
                     linewidth=0.5,
                 )
             else:
                 # Don't label subsequent lines to avoid duplicate legend entries
                 plt.plot(
                     data,
-                    # color=color_list[i],
-                    label=f"{chosen_metric[i]:.2f}",
+                    color=color_list[i],
+                    # label=f"{chosen_metric[i]:.2f}",
                     linewidth=0.5,
                 )
-            if NORMALIZE and not ADDITIVE_PERTURBATION:
+            if NORMALIZE and not additive_perturbation:
                 cur_reaching_point = calculate_step_of_A_to_T(
                     base_ref.act, r_other_act[i]
                 )
@@ -1109,11 +1147,11 @@ def plot_predefined_other(results):
                         results[perturb_name][i][cur_reaching_point],
                         color=color_list[i],
                     )
-    if predefined_other_metric == "dot product":
-        plt.legend(title="Dot products", fontsize=8)
-    elif predefined_other_metric == "cosine similarity":
-        plt.legend(title="Cosine similarities", fontsize=8)
-    if ADDITIVE_PERTURBATION:
+    # if predefined_other_metric == "dot product":
+    #     plt.legend(title="Dot products", fontsize=8)
+    # elif predefined_other_metric == "cosine similarity":
+    #     plt.legend(title="Cosine similarities", fontsize=8)
+    if additive_perturbation:
         plt.suptitle("orthogonal r-others")
         plt.title(
             f"Top {len(predefined_other_prompts)} chosen out of {mean_batch_size}, seed={seed}, n_ctx={n_ctx}",
@@ -1164,7 +1202,7 @@ def plot_activate_sae_features(results):
                     # color=color_list[i],
                     linewidth=0.5,
                 )
-            if NORMALIZE and not ADDITIVE_PERTURBATION:
+            if NORMALIZE and not additive_perturbation:
                 cur_reaching_point = calculate_step_of_A_to_T(
                     base_ref.act, recon_chosen_act[i]
                 )
@@ -1205,13 +1243,13 @@ if num_features:
     cur_key = activate_sae_feature_key
     cur_id = 8
 
-standard_kl_blowup = True
+standard_kl_blowup = False
 if R_OTHER or LAST_TOKEN:
     standard_kl_blowup = True
 
 if ACTIVATE_SAE_FEATURE:
     plot_activate_sae_features(results)
-elif PREDEFINED_OTHER:
+if PREDEFINED_OTHER:
     plot_predefined_other(results)
 # elif DAMPEN_FEATURE:
 #    plot_dampen_feature(results)
