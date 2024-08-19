@@ -379,7 +379,7 @@ def plot_blowup_step(blowup_step, metric):
     for perturb_name, steps in blowup_step.items():
         plt.hist(steps, bins=20, alpha=0.7, label=perturb_name, edgecolor="black")
 
-    plt.title(f"Histogram of Blowup Steps in {metric}")
+    plt.title(f"Histogram of Max Blowup Steps in {metric}")
     plt.xlabel("Steps")
     plt.ylabel("Frequency")
     plt.legend(title="Perturbation Type")
@@ -389,4 +389,79 @@ def plot_blowup_step(blowup_step, metric):
 
 plot_blowup_step(blowup_step_js, "JS Distance")
 plot_blowup_step(blowup_step_l2, "L2 Distance")
+# %%
+
+
+def calculate_metrics(blowup_step):
+    metrics = {}
+    for perturb_name, steps in blowup_step.items():
+        mean = np.mean(steps)
+        variance = np.var(steps)
+        metrics[perturb_name] = {"mean": mean, "variance": variance}
+    return metrics
+
+
+# Plot mean and variance for each perturbation
+def plot_metrics(metrics, metric_name):
+    perturb_names = list(metrics.keys())
+    means = [metrics[name]["mean"] for name in perturb_names]
+    variances = [metrics[name]["variance"] for name in perturb_names]
+
+    x = np.arange(len(perturb_names))  # the label locations
+    width = 0.35  # the width of the bars
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    bars1 = ax.bar(
+        x - width / 2, means, width, label="Mean", color="skyblue", edgecolor="black"
+    )
+    bars2 = ax.bar(
+        x + width / 2,
+        variances,
+        width,
+        label="Variance",
+        color="lightgreen",
+        edgecolor="black",
+    )
+
+    # Add some text for labels, title and custom x-axis tick labels, etc.
+    ax.set_xlabel("Perturbation Type")
+    ax.set_ylabel("Value")
+    ax.set_title(f"Mean and Variance of Max Blowup Steps in {metric_name}")
+    ax.set_xticks(x)
+    ax.set_xticklabels(perturb_names)
+    ax.legend()
+
+    # Add a grid for better readability
+    ax.grid(True)
+
+    # Attach a text label above each bar in *bars1* and *bars2*, displaying its height.
+    def autolabel(bars):
+        """Attach a text label above each bar in *bars*, displaying its height."""
+        for bar in bars:
+            height = bar.get_height()
+            ax.annotate(
+                "{}".format(round(height, 2)),
+                xy=(bar.get_x() + bar.get_width() / 2, height),
+                xytext=(0, 3),  # 3 points vertical offset
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+            )
+
+    autolabel(bars1)
+    autolabel(bars2)
+
+    fig.tight_layout()
+
+    plt.show()
+
+
+# Calculate metrics for JS and L2 distances
+metrics_js = calculate_metrics(blowup_step_js)
+metrics_l2 = calculate_metrics(blowup_step_l2)
+
+# Plot metrics for JS and L2 distances
+plot_metrics(metrics_js, "JS Distance")
+plot_metrics(metrics_l2, "L2 Distance")
+
 # %%
