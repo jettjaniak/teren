@@ -66,12 +66,15 @@ def generate_prompt(dataset, n_ctx: int = 1, batch: int = 1) -> torch.Tensor:
 
 
 def get_random_activation(
-    model: HookedTransformer, dataset: Dataset, n_ctx: int, layer: str, pos
+    model: HookedTransformer, dataset: Dataset, n_ctx: int, layer: str, pos, resid_acts
 ) -> torch.Tensor:
     """Get a random activation from the dataset."""
-    rand_prompt = generate_prompt(dataset, n_ctx=n_ctx)
-    logits, cache = model.run_with_cache(rand_prompt)
-    ret = cache[layer][:, pos, :].to("cpu").detach()
+    while True:
+        rand_prompt = generate_prompt(dataset, n_ctx=n_ctx)
+        logits, cache = model.run_with_cache(rand_prompt)
+        ret = cache[layer][:, pos, :].to("cpu").detach()
+        if (ret - resid_acts).norm() > 1e-3:
+            break
     return ret
 
 
@@ -177,6 +180,7 @@ class RandomActivationPerturbation(Perturbation):
             n_ctx,
             perturbation_layer,
             perturbation_pos,
+            resid_acts,
         )
         return target - resid_acts
 
@@ -351,44 +355,122 @@ for _ in tqdm(range(num_runs)):
 
 
 # %%
-def max_blowup_step(js_dists):
-    diff = torch.diff(js_dists)
+def max_slope_step(values):
+    diff = torch.diff(values)
     return torch.argmax(diff)
 
 
-def first_blowup_step(js_dists):
-    diff = torch.diff(js_dists)
-    return torch.argmax(diff)
+def NL_step(values, start_step=1, end_step=10, threshold=10):
+    n = len(values)
+
+    # Ensure we have enough data points
+    if end_step >= n:
+        raise ValueError(
+            f"End step {end_step} is out of bounds for the list of length {n}."
+        )
+
+    # Calculate the slope (m) using values at start_step and end_step
+    x1, y1 = start_step - 1, values[start_step - 1]
+    x2, y2 = end_step - 1, values[end_step - 1]
+    slope = (y2 - y1) / (x2 - x1)
+
+    # Calculate the intercept (b)
+    intercept = y1 - slope * x1
+
+    # Check deviations from step 10 onward
+    for i in range(end_step, n):
+        # Calculate the expected y value using the linear approximation
+        expected_y = slope * i + intercept
+
+        # Calculate the actual y value
+        actual_y = values[i]
+
+        # Calculate the percentage deviation
+        deviation = abs(actual_y - expected_y) / expected_y * 100
+
+        # Check if the deviation exceeds the threshold
+        if deviation > threshold:
+            return i
+    return n
+    # raise ValueError("No deviation exceeds the threshold.")
+
+
+def calculate_auc(values):
+    # Create x values corresponding to the indices of the values
+    x = np.arange(len(values))
+
+    # Use numpy's trapezoidal rule to calculate the area under the curve
+    auc = np.trapz(values, x)
+
+    return auc
+
+
+def max_space_ratio_step(values):
+    aucs = []
+    for i in range(1, len(values)):
+        auc = calculate_auc(values[:i])
+        if auc == 0:
+            aucs.append(0)
+            continue
+        triangle_area = (values[i - 1] * i) / 2
+        aucs.append(triangle_area / auc)
+    return np.argmax(aucs[5:]) + 5  # Hacky, but works. Wonky stuff at the start
 
 
 # %%
 
 blowup_step_js = {}
 blowup_step_l2 = {}
-for perturb_name, js_dists in results.items():
+NL_step_js = {}
+NL_step_l2 = {}
+ratio_step_js = {}
+ratio_step_l2 = {}
+for perturb_name, dists in results.items():
     blowup_step_js[perturb_name] = []
     blowup_step_l2[perturb_name] = []
+    NL_step_js[perturb_name] = []
+    NL_step_l2[perturb_name] = []
+    ratio_step_js[perturb_name] = []
+    ratio_step_l2[perturb_name] = []
     for i in range(num_runs):
-        blowup_step_js[perturb_name].append(max_blowup_step(js_dists[i][0].squeeze(-1)))
-        blowup_step_l2[perturb_name].append(max_blowup_step(js_dists[i][1].squeeze(-1)))
+        blowup_step_js[perturb_name].append(max_slope_step(dists[i][0].squeeze(-1)))
+        blowup_step_l2[perturb_name].append(max_slope_step(dists[i][1].squeeze(-1)))
+        NL_step_js[perturb_name].append(NL_step(dists[i][0].squeeze(-1)))
+        try:
+            NL_step_l2[perturb_name].append(NL_step(dists[i][1].squeeze(-1)))
+        except ValueError:
+            print(i)
+        ratio_step_js[perturb_name].append(
+            max_space_ratio_step(dists[i][0].squeeze(-1))
+        )
+        ratio_step_l2[perturb_name].append(
+            max_space_ratio_step(dists[i][1].squeeze(-1))
+        )
 
 
 # %%
-def plot_blowup_step(blowup_step, metric):
+def plot_steps(blowup_step, step_type, metric):
     plt.figure(figsize=(10, 6))  # Set the figure size
     for perturb_name, steps in blowup_step.items():
         plt.hist(steps, bins=20, alpha=0.7, label=perturb_name, edgecolor="black")
 
-    plt.title(f"Histogram of Max Blowup Steps in {metric}")
+    plt.title(f"Histogram of {step_type} Steps in {metric}")
     plt.xlabel("Steps")
     plt.ylabel("Frequency")
     plt.legend(title="Perturbation Type")
     plt.grid(True)
+    plt.xlim(0, n_steps)
     plt.show()
 
 
-plot_blowup_step(blowup_step_js, "JS Distance")
-plot_blowup_step(blowup_step_l2, "L2 Distance")
+plot_steps(blowup_step_js, "Max Slope", "JS Distance")
+plot_steps(blowup_step_l2, "Max Slope", "L2 Distance")
+plot_steps(NL_step_js, "First Non-linearity", "JS Distance")
+plot_steps(NL_step_l2, "First Non-linearity", "L2 Distance")
+plot_steps(ratio_step_js, "Max Triangle/AUC Space Ratio", "JS Distance")
+plot_steps(ratio_step_l2, "Max Triangle/AUC Space Ratio", "L2 Distance")
+
+
 # %%
 
 
@@ -396,13 +478,13 @@ def calculate_metrics(blowup_step):
     metrics = {}
     for perturb_name, steps in blowup_step.items():
         mean = np.mean(steps)
-        variance = np.var(steps)
+        variance = np.std(steps)
         metrics[perturb_name] = {"mean": mean, "variance": variance}
     return metrics
 
 
 # Plot mean and variance for each perturbation
-def plot_metrics(metrics, metric_name):
+def plot_metrics(metrics, step_type, metric_name):
     perturb_names = list(metrics.keys())
     means = [metrics[name]["mean"] for name in perturb_names]
     variances = [metrics[name]["variance"] for name in perturb_names]
@@ -418,7 +500,7 @@ def plot_metrics(metrics, metric_name):
         x + width / 2,
         variances,
         width,
-        label="Variance",
+        label="Standard Deviation",
         color="lightgreen",
         edgecolor="black",
     )
@@ -426,7 +508,7 @@ def plot_metrics(metrics, metric_name):
     # Add some text for labels, title and custom x-axis tick labels, etc.
     ax.set_xlabel("Perturbation Type")
     ax.set_ylabel("Value")
-    ax.set_title(f"Mean and Variance of Max Blowup Steps in {metric_name}")
+    ax.set_title(f"Mean and Standard Deviation of {step_type} Steps in {metric_name}")
     ax.set_xticks(x)
     ax.set_xticklabels(perturb_names)
     ax.legend()
@@ -457,11 +539,18 @@ def plot_metrics(metrics, metric_name):
 
 
 # Calculate metrics for JS and L2 distances
-metrics_js = calculate_metrics(blowup_step_js)
-metrics_l2 = calculate_metrics(blowup_step_l2)
-
+metrics_max_step_js = calculate_metrics(blowup_step_js)
+metrics_max_step_l2 = calculate_metrics(blowup_step_l2)
+metrics_NL_js = calculate_metrics(NL_step_js)
+metrics_NL_l2 = calculate_metrics(NL_step_l2)
+metrics_ratio_js = calculate_metrics(ratio_step_js)
+metrics_ratio_l2 = calculate_metrics(ratio_step_l2)
 # Plot metrics for JS and L2 distances
-plot_metrics(metrics_js, "JS Distance")
-plot_metrics(metrics_l2, "L2 Distance")
+plot_metrics(metrics_max_step_js, "Max Slope", "JS Distance")
+plot_metrics(metrics_max_step_l2, "Max Slope", "L2 Distance")
+plot_metrics(metrics_NL_js, "First Non-linearity", "JS Distance")
+plot_metrics(metrics_NL_l2, "First Non-linearity", "L2 Distance")
+plot_metrics(metrics_ratio_js, "Max Triangle/AUC Space Ratio", "JS Distance")
+plot_metrics(metrics_ratio_l2, "Max Triangle/AUC Space Ratio", "L2 Distance")
 
 # %%
