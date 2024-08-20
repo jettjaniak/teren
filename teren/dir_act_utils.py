@@ -26,7 +26,7 @@ def get_input_ids(
     )
     text_dataset.shuffle()
     text_dataset = cast(Dataset, text_dataset)
-    text_dataset = text_dataset.select(range(1_000))
+    text_dataset = text_dataset.select(range(10_000))
 
     tokens_dataset = tl_utils.tokenize_and_concatenate(
         text_dataset,
