@@ -89,8 +89,10 @@ def ablate_dir(
     dir: Float[torch.Tensor, "model"],
     dir_acts: Float[torch.Tensor, "prompt seq"],
 ) -> Float[torch.Tensor, "prompt seq model"]:
-    dir_vecs = einsum("prompt seq, model -> prompt seq model", dir_acts, dir)
-    return resid_acts - dir_vecs
+    dir_vecs = einsum("prompt, model -> prompt model", dir_acts[:, -1], dir)
+    resid_acts = resid_acts.clone()
+    resid_acts[:, -1] -= dir_vecs
+    return resid_acts
 
 
 def get_act_range(
