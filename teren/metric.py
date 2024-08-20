@@ -57,6 +57,6 @@ jsd_metric = Metric(
     measure_fn=comp_js_dist,
     stop_at_layer=None,
     symmetric=True,
-    thresh=0.1,
+    thresh=0.01,
     range=(0.0, 1.0),
 )

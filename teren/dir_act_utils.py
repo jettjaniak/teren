@@ -1,23 +1,60 @@
+import os
+import random
+
 from datasets import Dataset, VerificationMode, load_dataset
 from fancy_einsum import einsum
-from tqdm.auto import trange
+from tqdm.auto import tqdm, trange
 from transformer_lens import HookedTransformer
+from transformer_lens import utils as tl_utils
+from transformers import PreTrainedTokenizerBase
 
 from teren.typing import *
 
 
-def get_input_ids(chunk: int, seq_len: int) -> Int[torch.Tensor, "prompt seq"]:
-    dataset = load_dataset(
-        "apollo-research/Skylion007-openwebtext-tokenizer-gpt2",
-        data_files=f"data/train-{chunk:05}-of-00073.parquet",
+def get_input_ids(
+    chunk: int,
+    seq_len: int,
+    n_prompts: int,
+    tokenizer: PreTrainedTokenizerBase,
+):
+    text_dataset = load_dataset(
+        "monology/pile-uncopyrighted",
+        data_files=f"default/partial-train/{chunk:04}.parquet",
         verification_mode=VerificationMode.NO_CHECKS,
         split="train",
+        revision="refs/convert/parquet",
     )
-    dataset = cast(Dataset, dataset)
-    dataset.set_format(type="torch")
-    input_ids = cast(torch.Tensor, dataset["input_ids"])
-    input_ids = input_ids.view(-1, seq_len)
-    return input_ids[torch.randperm(input_ids.shape[0])]
+    text_dataset.shuffle()
+    text_dataset = cast(Dataset, text_dataset)
+    text_dataset = text_dataset.select(range(1_000))
+
+    tokens_dataset = tl_utils.tokenize_and_concatenate(
+        text_dataset,
+        tokenizer,  # type: ignore
+        max_length=seq_len,
+        num_proc=os.cpu_count() - 1,  # type: ignore
+        add_bos_token=False,
+    )
+    tokens_dataset.set_format(type="torch")
+    return tokens_dataset[random.sample(range(len(tokens_dataset)), n_prompts)][
+        "tokens"
+    ]
+
+
+def get_model_output(
+    model: HookedTransformer,
+    resid_acts: Float[torch.Tensor, "prompt seq model"],
+    act_vec: Float[torch.Tensor, "model"],
+    start_at_layer: int,
+    stop_at_layer: int | None,
+) -> Float[torch.Tensor, "prompt output"]:
+    resid_acts = resid_acts.clone()
+    resid_acts[:, -1] += act_vec
+    return model(
+        resid_acts,
+        start_at_layer=start_at_layer,
+        stop_at_layer=stop_at_layer,
+    )[:, -1]
 
 
 def get_clean_resid_acts(
@@ -34,7 +71,7 @@ def get_clean_resid_acts(
         batch_input_ids = input_ids[i : i + batch_size]
         resid_acts[i : i + batch_size] = model(
             batch_input_ids,
-            stop_at_layer=layer,
+            stop_at_layer=layer + 1,
         )
     return resid_acts
 
@@ -129,3 +166,24 @@ def compute_max_convex_scores(
         )
         max_scores[mid] = max_score
     return max_scores.max(0)
+
+
+def compute_max_plateau_scores(
+    matmet: Float[torch.Tensor, "act act sel"], thresh: float
+) -> tuple[Float[torch.Tensor, "sel"], Int[torch.Tensor, "sel"]]:
+    """Returns min scores and corresponding idx of act level A"""
+    n_act, n_sel = matmet.shape[1:]
+    scores = torch.empty(n_act, n_sel)
+    max_metric = matmet.max(0).values.max(0).values
+    for mid in range(n_act):
+        score = torch.zeros(n_sel)
+        mask = torch.ones(n_sel, dtype=torch.bool)
+        for i in range(mid + 1, n_act):
+            mask &= matmet[mid, i] <= max_metric * thresh
+            score[mask] += 1 / n_act
+        mask = torch.ones(n_sel, dtype=torch.bool)
+        for i in range(mid - 1, -1, -1):
+            mask &= matmet[mid, i] <= max_metric * thresh
+            score[mask] += 1 / n_act
+        scores[mid] = score
+    return scores.max(0)

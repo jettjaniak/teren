@@ -1,11 +1,15 @@
 from collections import defaultdict
 
+from tqdm.auto import tqdm, trange
+
 from teren.dir_act_utils import (
     ablate_dir,
     compute_dir_acts,
     compute_max_convex_scores,
+    compute_max_plateau_scores,
     get_act_range,
     get_act_vec,
+    get_model_output,
 )
 from teren.experiment_context import ExperimentContext
 from teren.metric import Metric
@@ -17,9 +21,13 @@ class MetricResults:
     mm_hist: Float[torch.Tensor, "bins"] | None = None
     # prompt, seq_in, seq_out
     mm_sel: Int[torch.Tensor, "sel"] | None = None
+    matmet: Float[torch.Tensor, "act act sel"] | None = None
     cvx_score: Float[torch.Tensor, "sel"] | None = None
-    # idx of act A that has the lowest convex score
+    # idx of act A that has the highest convex score
     cvx_act: Int[torch.Tensor, "sel"] | None = None
+    pla_score: Float[torch.Tensor, "sel"] | None = None
+    # idx of act A that has the highest plateau score
+    pla_act: Int[torch.Tensor, "sel"] | None = None
 
 
 class Direction:
@@ -71,10 +79,14 @@ class Direction:
         res.mm_sel = sel
 
     def process_metric_cvx(self, metric: Metric):
-        matmet = self.compute_matmet(metric)
         res = self.res_by_metric[metric]
-        res.cvx_score, res.cvx_act = compute_max_convex_scores(matmet)
-        return matmet
+        assert res.matmet is not None
+        res.cvx_score, res.cvx_act = compute_max_convex_scores(res.matmet)
+
+    def process_metric_pla(self, metric: Metric, thresh: float):
+        res = self.res_by_metric[metric]
+        assert res.matmet is not None
+        res.pla_score, res.pla_act = compute_max_plateau_scores(res.matmet, thresh)
 
     def compute_metric_all(
         self,
@@ -84,22 +96,24 @@ class Direction:
         act_vec_b: Float[torch.Tensor, "model"],
     ) -> Float[torch.Tensor, "prompt"]:
         """Calculate metric while patching and measuring at last seq position"""
-
-        def get_model_output(act_vec):
-            resid_acts = b_abl_resid_acts.clone()
-            resid_acts[:, -1] += act_vec
-            return self.exctx.model(
-                resid_acts,
-                start_at_layer=self.exctx.layer,
-                stop_at_layer=metric.stop_at_layer,
-            )[:, -1]
-
         bs = int(self.exctx.batch_size * metric.batch_frac)
         ret = torch.empty(self.exctx.n_prompts)
         for i in range(0, self.exctx.n_prompts, bs):
             b_abl_resid_acts = self.abl_resid_acts[i : i + bs]
-            output_a = get_model_output(act_vec_a)
-            output_b = get_model_output(act_vec_b)
+            output_a = get_model_output(
+                model=self.exctx.model,
+                resid_acts=b_abl_resid_acts,
+                act_vec=act_vec_a,
+                start_at_layer=self.exctx.layer + 1,
+                stop_at_layer=metric.stop_at_layer,
+            )
+            output_b = get_model_output(
+                model=self.exctx.model,
+                resid_acts=b_abl_resid_acts,
+                act_vec=act_vec_b,
+                start_at_layer=self.exctx.layer + 1,
+                stop_at_layer=metric.stop_at_layer,
+            )
             ret[i : i + bs] = metric.measure_fn(output_a, output_b)
         return ret
 
@@ -112,15 +126,6 @@ class Direction:
     ) -> Float[torch.Tensor, "sel"]:
         """Calculate measure for sel (prompt, seq_in, seq_out)"""
 
-        def get_model_output(act_vec):
-            resid_acts = b_abl_resid_acts.clone()
-            resid_acts[:, -1] += act_vec
-            return self.exctx.model(
-                resid_acts,
-                start_at_layer=self.exctx.layer,
-                stop_at_layer=metric.stop_at_layer,
-            )[:, -1]
-
         sel = self.res_by_metric[metric].mm_sel
         n_sel = sel.shape[0]  # type: ignore
         bs = int(self.exctx.batch_size * metric.batch_frac)
@@ -128,12 +133,24 @@ class Direction:
         for i in range(0, n_sel, bs):
             b_sel = sel[i : i + bs]  # type: ignore
             b_abl_resid_acts = self.abl_resid_acts[b_sel]
-            output_a = get_model_output(act_vec_a)
-            output_b = get_model_output(act_vec_b)
+            output_a = get_model_output(
+                model=self.exctx.model,
+                resid_acts=b_abl_resid_acts,
+                act_vec=act_vec_a,
+                start_at_layer=self.exctx.layer + 1,
+                stop_at_layer=metric.stop_at_layer,
+            )
+            output_b = get_model_output(
+                model=self.exctx.model,
+                resid_acts=b_abl_resid_acts,
+                act_vec=act_vec_b,
+                start_at_layer=self.exctx.layer + 1,
+                stop_at_layer=metric.stop_at_layer,
+            )
             ret[i : i + bs] = metric.measure_fn(output_a, output_b)
         return ret
 
-    def compute_matmet(self, metric: Metric) -> Float[torch.Tensor, "act act sel"]:
+    def compute_matmet(self, metric: Metric):
         """Calculate metric for all pairs of act vectors"""
         n_act = self.exctx.n_act
         act_fracs = torch.linspace(self.act_min, self.act_max, n_act)
@@ -145,23 +162,26 @@ class Direction:
         res = self.res_by_metric[metric]
         n_sel = res.mm_sel.shape[0]  # type: ignore
         ret = torch.empty(n_act, n_act, n_sel)
-
-        for i in range(n_act):
-            ret[i, i] = 0
-            if metric.symmetric:
-                for j in range(i):
-                    ret[i, j] = ret[j, i] = self.compute_measure_sel(
-                        metric=metric,
-                        act_vec_a=act_vecs[i],
-                        act_vec_b=act_vecs[j],
-                    )
-            else:
-                for j in range(n_act):
-                    if i == j:
-                        continue
-                    ret[i, j] = self.compute_measure_sel(
-                        metric=metric,
-                        act_vec_a=act_vecs[i],
-                        act_vec_b=act_vecs[j],
-                    )
-        return ret
+        total = n_act * (n_act - 1) // 2 if metric.symmetric else n_act * n_act
+        with tqdm(total=total) as pbar:
+            for i in range(n_act):
+                ret[i, i] = 0
+                if metric.symmetric:
+                    for j in range(i):
+                        ret[i, j] = ret[j, i] = self.compute_measure_sel(
+                            metric=metric,
+                            act_vec_a=act_vecs[i],
+                            act_vec_b=act_vecs[j],
+                        )
+                        pbar.update(1)
+                else:
+                    for j in range(n_act):
+                        if i == j:
+                            continue
+                        ret[i, j] = self.compute_measure_sel(
+                            metric=metric,
+                            act_vec_a=act_vecs[i],
+                            act_vec_b=act_vecs[j],
+                        )
+                        pbar.update(1)
+        self.res_by_metric[metric].matmet = ret
