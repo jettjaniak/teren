@@ -15,7 +15,7 @@ class SAEFeatureExamples:
     fids: list[FeatureId]
     input_ids: Int[torch.Tensor, "feature example seq"]
     resid_acts: Float[torch.Tensor, "feature example seq model"]
-    clean_loss: Float[torch.Tensor, "feature example seq"]
+    clean_logits: Float[torch.Tensor, "feature example seq vocab"]
 
     @property
     def n_active_features(self):
@@ -46,7 +46,7 @@ class SAEFeatureExamples:
         assert pert_norm.isfinite().all()
         return pert_vec, pert_norm
 
-    def compute_pert_norm_and_loss(
+    def compute_pert_norm_and_logits(
         self,
         pert_by_fid: Mapping[FeatureId, Perturbation],
         model: HookedTransformer,
@@ -54,11 +54,11 @@ class SAEFeatureExamples:
         batch_size: int,
     ) -> tuple[
         Float[torch.Tensor, "feature example seq 1"],
-        Float[torch.Tensor, "feature example seq_m1"],
+        Float[torch.Tensor, "feature example seq vocab"],
     ]:
         pert_vec, pert_norm = self.compute_pert_vec_and_pert_norm(pert_by_fid)
         pert_resid_acts = self.resid_acts + pert_vec
-        loss_by_feature = utils.compute_loss(
+        loss_by_feature = utils.compute_logits(
             model=model,
             input_ids=self.input_ids,
             resid_acts=pert_resid_acts,
@@ -67,14 +67,14 @@ class SAEFeatureExamples:
         )
         return pert_norm, loss_by_feature
 
-    def compute_pert_loss(
+    def compute_pert_logits(
         self,
         pert_by_fid: Mapping[FeatureId, Perturbation],
         model: HookedTransformer,
         layer: int,
         target_pert_norm: Float[torch.Tensor, "feature example seq 1"],
         batch_size: int,
-    ) -> Float[torch.Tensor, "feature example seq_m1"]:
+    ) -> Float[torch.Tensor, "feature example seq vocab"]:
         """Apply perturbation with target norm, return perturbation loss"""
         # TODO: for Stefan's repro have KL div option (and store logits, and maybe L2)
         pert_vec, pert_norm = self.compute_pert_vec_and_pert_norm(pert_by_fid)
@@ -84,7 +84,7 @@ class SAEFeatureExamples:
         mask = pert_norm > 0
         pert_scale[mask] = target_pert_norm[mask] / pert_norm[mask]
         pert_resid_acts = self.resid_acts + pert_vec * pert_scale
-        loss = utils.compute_loss(
+        loss = utils.compute_logits(
             model=model,
             input_ids=self.input_ids,
             resid_acts=pert_resid_acts,
@@ -116,7 +116,7 @@ class BatchSAEFeatureExamples:
     resid_acts: dict[FeatureId, Float[torch.Tensor, "examples seq model"]] = field(
         default_factory=dict
     )
-    clean_loss: dict[FeatureId, Float[torch.Tensor, "examples seq_m1"]] = field(
+    clean_logits: dict[FeatureId, Float[torch.Tensor, "examples seq vocab"]] = field(
         default_factory=dict
     )
 
@@ -129,17 +129,17 @@ class ListsSAEFeatureExamples:
     resid_acts: Mapping[FeatureId, list[Float[torch.Tensor, "examples seq model"]]] = (
         field(default_factory=lambda: defaultdict(list))
     )
-    clean_loss: Mapping[FeatureId, list[Float[torch.Tensor, "examples seq_m1"]]] = (
+    clean_logits: Mapping[FeatureId, list[Float[torch.Tensor, "examples seq vocab"]]] = (
         field(default_factory=lambda: defaultdict(list))
     )
 
     def update(self, batch_sae_feature_examples: BatchSAEFeatureExamples):
         for feature_id, other_input_ids in batch_sae_feature_examples.input_ids.items():
             other_resid_acts = batch_sae_feature_examples.resid_acts[feature_id]
-            other_clean_loss = batch_sae_feature_examples.clean_loss[feature_id]
+            other_clean_logits = batch_sae_feature_examples.clean_logits[feature_id]
             self.input_ids[feature_id].append(other_input_ids)
             self.resid_acts[feature_id].append(other_resid_acts)
-            self.clean_loss[feature_id].append(other_clean_loss)
+            self.clean_logits[feature_id].append(other_clean_logits)
 
     def filter_and_cat(self, n_examples: int) -> SAEFeatureExamples:
         active_feature_ids = []
@@ -159,7 +159,7 @@ class ListsSAEFeatureExamples:
             this_input_ids = torch.cat(this_input_ids_list[:n_batches])[:n_examples]
             this_resid_acts_list = self.resid_acts[feature_id]
             this_resid_acts = torch.cat(this_resid_acts_list[:n_batches])[:n_examples]
-            this_loss_list = self.clean_loss[feature_id]
+            this_loss_list = self.clean_logits[feature_id]
             this_loss = torch.cat(this_loss_list[:n_batches])[:n_examples]
             assert (
                 this_resid_acts.shape[0]
@@ -175,14 +175,14 @@ class ListsSAEFeatureExamples:
             fids=active_feature_ids,
             input_ids=torch.stack(input_ids_list, dim=0),
             resid_acts=torch.stack(resid_acts_list, dim=0),
-            clean_loss=torch.stack(loss_list, dim=0),
+            clean_logits=torch.stack(loss_list, dim=0),
         )
 
 
 def get_batch_sae_feature_examples(
     input_ids: Int[torch.Tensor, "batch seq"],
     resid_acts: Float[torch.Tensor, "batch seq d_model"],
-    loss: Float[torch.Tensor, "batch seq_m1"],
+    logits: Float[torch.Tensor, "batch seq vocab"],
     sae: SAE,
     fids: list[FeatureId],
     min_activation,
@@ -197,7 +197,7 @@ def get_batch_sae_feature_examples(
         f_active_mask = max_feature_acts[:, fid_idx] > min_activation
         ret.resid_acts[fid] = resid_acts[f_active_mask].clone().cpu()
         ret.input_ids[fid] = input_ids[f_active_mask.to(input_ids.device)]
-        ret.clean_loss[fid] = loss[f_active_mask].clone().cpu()
+        ret.clean_logits[fid] = logits[f_active_mask].clone().cpu()
     return ret
 
 
@@ -223,11 +223,9 @@ def get_sae_feature_examples_by_layer_and_resid_stats_by_layer(
         # no need to move to device, as long as model is on a correct device
         batch_input_ids = input_ids[i : i + batch_size]
         names_filter = [sae.cfg.hook_name for sae in sae_by_layer.values()]
-        batch_loss, batch_cache = model.run_with_cache(
+        batch_logits, batch_cache = model.run_with_cache(
             batch_input_ids,
             names_filter=names_filter,
-            return_type="loss",
-            loss_per_token=True,
         )
 
         for sae, sae_examples_lists_by_feature, resid_sum in zip(
@@ -241,7 +239,7 @@ def get_sae_feature_examples_by_layer_and_resid_stats_by_layer(
             sae_examples_batch_by_feature = get_batch_sae_feature_examples(
                 input_ids=batch_input_ids,
                 resid_acts=batch_resid_acts,
-                loss=batch_loss,  # type: ignore
+                logits=batch_logits,  # type: ignore
                 sae=sae,
                 fids=fids,
                 min_activation=min_activation,

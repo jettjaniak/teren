@@ -50,7 +50,7 @@ def get_pert_by_fid_by_name_by_layer(
     return pert_by_fid_by_name_by_layer
 
 
-def compute_loss_by_pert_normalized(
+def compute_logits_by_pert_normalized(
     sae_feature_examples: SAEFeatureExamples,
     pert_by_fid_by_name: Mapping[str, Mapping[FeatureId, Perturbation]],
     model: HookedTransformer,
@@ -62,7 +62,7 @@ def compute_loss_by_pert_normalized(
     Perturbations are normalized to match the norm of the ablate_sae_feature perturbation.
     """
     target_pert_norm, ablate_sae_feature_loss = (
-        sae_feature_examples.compute_pert_norm_and_loss(
+        sae_feature_examples.compute_pert_norm_and_logits(
             pert_by_fid=pert_by_fid_by_name["ablate_sae_feature"],
             model=model,
             layer=layer,
@@ -74,7 +74,7 @@ def compute_loss_by_pert_normalized(
     for pert_name, pert_by_fid in pert_by_fid_by_name.items():
         if pert_name == "ablate_sae_feature":
             continue
-        loss_by_pert[pert_name] = sae_feature_examples.compute_pert_loss(
+        loss_by_pert[pert_name] = sae_feature_examples.compute_pert_logits(
             pert_by_fid=pert_by_fid,
             model=model,
             layer=layer,
@@ -84,7 +84,7 @@ def compute_loss_by_pert_normalized(
     return loss_by_pert
 
 
-def compute_loss_by_pert_normalized_by_layer_and_ablate_resid_loss_by_layer(
+def compute_logits_by_pert_normalized_by_layer_and_ablate_resid_loss_by_layer(
     model: HookedTransformer,
     sae_feature_examples_by_layer: Mapping[int, SAEFeatureExamples],
     pert_by_fid_by_name_by_layer: Mapping[
@@ -95,7 +95,7 @@ def compute_loss_by_pert_normalized_by_layer_and_ablate_resid_loss_by_layer(
     loss_by_pert_by_layer = {}
     for layer, sae_feature_examples in sae_feature_examples_by_layer.items():
         pert_by_fid_by_name = pert_by_fid_by_name_by_layer[layer]
-        loss_by_pert_by_layer[layer] = compute_loss_by_pert_normalized(
+        loss_by_pert_by_layer[layer] = compute_logits_by_pert_normalized(
             sae_feature_examples=sae_feature_examples,
             pert_by_fid_by_name=pert_by_fid_by_name,
             model=model,
@@ -108,21 +108,41 @@ def compute_loss_by_pert_normalized_by_layer_and_ablate_resid_loss_by_layer(
         for layer, loss_by_pert in loss_by_pert_by_layer.items()
     }
     return loss_by_pert_by_layer, ablate_resid_loss_by_layer
+LOG2E = math.log2(math.e)
 
+def comp_js_dist(
+    p_logit: Float[torch.Tensor, "*batch vocab"],
+    q_logit: Float[torch.Tensor, "*batch vocab"],
+) -> Float[torch.Tensor, "*batch"]:
+    p_logprob = torch.log_softmax(p_logit, dim=-1)
+    q_logprob = torch.log_softmax(q_logit, dim=-1)
+    p = p_logprob.exp()
+    q = q_logprob.exp()
 
-def compute_results_from_loss(
+    # convert to log2
+    p_logprob *= LOG2E
+    q_logprob *= LOG2E
+
+    m = 0.5 * (p + q)
+    m_logprob = m.log2()
+
+    p_kl_div = (p * (p_logprob - m_logprob)).sum(-1)
+    q_kl_div = (q * (q_logprob - m_logprob)).sum(-1)
+
+    assert p_kl_div.isfinite().all()
+    assert q_kl_div.isfinite().all()
+    divergence = (p_kl_div + q_kl_div) / 2
+    return divergence.sqrt()
+
+def compute_results_from_logits(
     layer: int,
     pert_name: str,
-    loss: Float[torch.Tensor, "feature example seq"],
-    clean_loss: Float[torch.Tensor, "feature example seq"],
-    reference_loss: Float[torch.Tensor, "feature example seq"],
+    logits: Float[torch.Tensor, "feature example seq vocab"],
+    clean_logits: Float[torch.Tensor, "feature example seq vocab"],
+    reference_logits: Float[torch.Tensor, "feature example seq vocab"],
 ) -> dict:
     # (features, examples, seq-1)
-    loss_incr = utils.compute_normalized_loss_increse(
-        loss=loss,
-        clean_loss=clean_loss,
-        reference_loss=reference_loss,
-    )
+    loss_incr = comp_js_dist(logits, clean_logits)
 
     # (features, examples)
     seq_aggregated_losses_by_name = {
@@ -134,7 +154,7 @@ def compute_results_from_loss(
 
     results = {
         "pert_name": pert_name,
-        "n_features": loss.shape[0],
+        "n_features": logits.shape[0],
         "layer": layer,
     }
     for aggregation_name, seq_aggregated_loss in seq_aggregated_losses_by_name.items():
@@ -153,38 +173,38 @@ def compute_results_from_loss(
 
 def compute_results_by_pert(
     layer: int,
-    loss_by_pert: Mapping[str, Float[torch.Tensor, "feature example seq"]],
-    clean_loss: Float[torch.Tensor, "feature example seq"],
-    reference_loss: Float[torch.Tensor, "feature example seq"],
+    logits_by_pert: Mapping[str, Float[torch.Tensor, "feature example seq vocab"]],
+    clean_logits: Float[torch.Tensor, "feature example seq vocab"],
+    reference_logits: Float[torch.Tensor, "feature example seq vocab"],
 ) -> list[dict]:
     results = []
-    for pert_name, loss in loss_by_pert.items():
+    for pert_name, logits in logits_by_pert.items():
         results.append(
-            compute_results_from_loss(
+            compute_results_from_logits(
                 layer=layer,
                 pert_name=pert_name,
-                loss=loss,
-                clean_loss=clean_loss,
-                reference_loss=reference_loss,
+                logits=logits,
+                clean_logits=clean_logits,
+                reference_logits=reference_logits,
             )
         )
     return results
 
 
 def compute_results_df(
-    loss_by_pert_by_layer: Mapping[
-        int, Mapping[str, Float[torch.Tensor, "feature example seq"]]
+    logits_by_pert_by_layer: Mapping[
+        int, Mapping[str, Float[torch.Tensor, "feature example seq vocab"]]
     ],
-    clean_loss_by_layer: Mapping[int, Float[torch.Tensor, "feature example seq"]],
-    reference_loss_by_layer: Mapping[int, Float[torch.Tensor, "feature example seq"]],
+    clean_logits_by_layer: Mapping[int, Float[torch.Tensor, "feature example seq vocab"]],
+    reference_logits_by_layer: Mapping[int, Float[torch.Tensor, "feature example seq vocab"]],
 ) -> pd.DataFrame:
     results_dicts = []
-    for layer, loss_by_pert in loss_by_pert_by_layer.items():
+    for layer, loss_by_pert in logits_by_pert_by_layer.items():
         results_dicts += compute_results_by_pert(
             layer,
             loss_by_pert,
-            clean_loss_by_layer[layer],
-            reference_loss_by_layer[layer],
+            clean_logits_by_layer[layer],
+            reference_logits_by_layer[layer],
         )
     return pd.DataFrame(results_dicts)
 
@@ -195,7 +215,7 @@ def plot_results_df(df: pd.DataFrame, seq_aggregation: str):
     n_layers = len(layers)
     rows = 3
     cols = max(2, math.ceil(n_layers / rows))
-    width = cols * len(df["pert_name"].unique()) / 2
+    width = cols * len(df["pert_name"].unique()) * 0.7
     height = rows * 2
     fig, axes = plt.subplots(rows, cols, figsize=(width, height), sharey=False)
 
@@ -222,5 +242,5 @@ def plot_results_df(df: pd.DataFrame, seq_aggregation: str):
 
     # Adjust layout
     plt.tight_layout()
-    plt.subplots_adjust(left=0.32)  # Adjusted to make room for the legend
+    plt.subplots_adjust(left=0.30)  # Adjusted to make room for the legend
     plt.show()

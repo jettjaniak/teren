@@ -47,13 +47,13 @@ def logits_to_loss_per_token(
     return -next_logprobs
 
 
-def compute_loss(
+def compute_logits(
     model: HookedTransformer,
     input_ids: Int[torch.Tensor, "*batch seq"],
     resid_acts: Float[torch.Tensor, "*batch seq d_model"],
     start_at_layer: int,
     batch_size: int,
-) -> Float[torch.Tensor, "*batch seq"]:
+) -> Float[torch.Tensor, "*batch seq vocab"]:
     assert (
         input_ids.shape == resid_acts.shape[:-1]
     ), f"{input_ids.shape=} {resid_acts.shape=}"
@@ -71,13 +71,9 @@ def compute_loss(
             batch_resid_acts_flat,
             start_at_layer=start_at_layer,
         )
-        loss_per_token = logits_to_loss_per_token(
-            logits,
-            input_ids=batch_input_ids_flat,
-        )
-        losses_list.append(loss_per_token.cpu())
+        losses_list.append(logits.cpu())
     losses_flat = torch.cat(losses_list)
-    loss_shape = batch_shape + (d_seq - 1,)
+    loss_shape = batch_shape + (d_seq, -1)
     return losses_flat.view(loss_shape)
 
 
