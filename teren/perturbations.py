@@ -118,7 +118,7 @@ class AbstractFeaturesP(Perturbation):
         feature_acts = all_feature_acts[..., self.fid_idxs]
         features_pert = torch.zeros_like(all_feature_acts)
         features_pert[..., self.fid_idxs] = self.get_features_pert(feature_acts)
-        resid_pert = self.sae.decode(features_pert)
+        resid_pert = self.sae.decode(features_pert) - self.sae.b_dec
         return resid_pert.to(resid_acts.device)
 
     @final
