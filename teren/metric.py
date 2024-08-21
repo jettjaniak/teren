@@ -47,6 +47,7 @@ def comp_js_dist(
     assert p_kl_div.isfinite().all()
     assert q_kl_div.isfinite().all()
     divergence = (p_kl_div + q_kl_div) / 2
+    divergence = divergence.clamp(min=0.0)
     return divergence.sqrt()
 
 
