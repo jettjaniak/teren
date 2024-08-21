@@ -153,8 +153,7 @@ class Direction:
     def compute_matmet(self, metric: Metric):
         """Calculate metric for all pairs of act vectors"""
         n_act = self.exctx.n_act
-        act_fracs = torch.linspace(self.act_min, self.act_max, n_act)
-        act_vals = self.act_min + act_fracs * (self.act_max - self.act_min)
+        act_vals = torch.linspace(self.act_min, self.act_max, n_act)
         act_vecs = get_act_vec(
             act_vals=act_vals,
             dir=self.dir,
