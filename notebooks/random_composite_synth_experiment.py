@@ -357,7 +357,7 @@ if not is_positive_definite(data_cov):
 
 # %%
 sae = get_gpt2_res_jb_saes(perturbation_layer)[0][perturbation_layer].to("cpu")
-dead_feature_check_runs = 10  # Number of runs to check for dead features, each run has mean_batch_size samples
+dead_feature_check_runs = 100  # Number of runs to check for dead features, each run has mean_batch_size samples
 
 feature_map = torch.zeros(sae.cfg.d_sae, dtype=bool)
 for _ in tqdm(range(dead_feature_check_runs)):
@@ -499,16 +499,36 @@ for perturb_name, dists in results.items():
 
 
 # %%
-def plot_steps(blowup_step, step_type, metric):
+
+perturb_names = list(results.keys())
+
+# Define a list of colors
+colors = ["blue", "orange", "green", "red", "lightpink", "lightgray"]
+
+# Create a color mapping dictionary
+color_mapping = {name: colors[i % len(colors)] for i, name in enumerate(perturb_names)}
+
+
+def plot_steps(blowup_step, step_type, metric, n_steps=100):
     plt.figure(figsize=(10, 6))  # Set the figure size
+
+    #    bin_size = 5
+    #    bin_edges = np.arange(0, n_steps + bin_size, bin_size)
+
     for perturb_name, steps in blowup_step.items():
-        plt.hist(steps, bins=20, alpha=0.7, label=perturb_name, edgecolor="black")
+        plt.hist(
+            steps,
+            #            bins=bin_edges,
+            histtype="step",
+            alpha=0.7,
+            label=perturb_name,
+            edgecolor=color_mapping[perturb_name],
+        )
 
     plt.title(f"Histogram of {step_type} Steps in {metric}")
     plt.xlabel("Steps")
     plt.ylabel("Frequency")
     plt.legend(title="Perturbation Type")
-    plt.grid(True)
     plt.xlim(0, n_steps)
     plt.show()
 
@@ -587,5 +607,4 @@ plot_metrics(metrics_NL_js, "First Non-linearity", "JS Distance")
 plot_metrics(metrics_NL_l2, "First Non-linearity", "L2 Distance")
 plot_metrics(metrics_ratio_js, "Max Triangle/AUC Space Ratio", "JS Distance")
 plot_metrics(metrics_ratio_l2, "Max Triangle/AUC Space Ratio", "L2 Distance")
-
 # %%
