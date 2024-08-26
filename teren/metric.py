@@ -15,7 +15,7 @@ class Metric:
     ]
     symmetric: bool
     thresh: float
-    range: tuple[float, float]
+    range: tuple[float, float] | None = None
 
     @property
     def batch_frac(self) -> float:

@@ -44,7 +44,7 @@ def get_input_ids(
 def get_model_output(
     model: HookedTransformer,
     resid_acts: Float[torch.Tensor, "prompt seq model"],
-    act_vec: Float[torch.Tensor, "model"],
+    act_vec: Float[torch.Tensor, "prompt model"],
     start_at_layer: int,
     stop_at_layer: int | None,
 ) -> Float[torch.Tensor, "prompt output"]:
@@ -79,28 +79,28 @@ def get_clean_resid_acts(
 def compute_dir_acts(
     direction: Float[torch.Tensor, "model"],
     resid_acts: Float[torch.Tensor, "prompt seq model"],
-) -> Float[torch.Tensor, "prompt seq"]:
-    dot_prod = einsum("prompt seq model, model -> prompt seq", resid_acts, direction)
+) -> Float[torch.Tensor, "prompt"]:
+    dot_prod = einsum("prompt model, model -> prompt", resid_acts[:, -1], direction)
     return torch.relu(dot_prod)
 
 
 def ablate_dir(
     resid_acts: Float[torch.Tensor, "prompt seq model"],
     dir: Float[torch.Tensor, "model"],
-    dir_acts: Float[torch.Tensor, "prompt seq"],
+    dir_acts: Float[torch.Tensor, "prompt"],
 ) -> Float[torch.Tensor, "prompt seq model"]:
-    dir_vecs = einsum("prompt, model -> prompt model", dir_acts[:, -1], dir)
+    dir_vecs = einsum("prompt, model -> prompt model", dir_acts, dir)
     resid_acts = resid_acts.clone()
     resid_acts[:, -1] -= dir_vecs
     return resid_acts
 
 
 def get_act_range(
-    dir_acts: Float[torch.Tensor, "prompt seq"], q_min: float, q_max: float
+    dir_acts: Float[torch.Tensor, "prompt"], q_max: float
 ) -> tuple[float, float]:
     """Get quantiles of non-zero activations"""
-    qs = torch.quantile(dir_acts[dir_acts > 0], torch.tensor([q_min, q_max]))
-    return qs[0].item(), qs[1].item()
+    q = torch.quantile(dir_acts[dir_acts > 0], q_max)
+    return torch.min(dir_acts).item(), q.item()
 
 
 def get_act_vec(
@@ -111,63 +111,56 @@ def get_act_vec(
 
 
 def compute_single_convex_score(
-    mid: int,
-    i: int,
-    matmet: Float[torch.Tensor, "act act sel"],
-    prev_met: Float[torch.Tensor, "sel"],
-    auc: Float[torch.Tensor, "sel"],
-) -> tuple[
-    Float[torch.Tensor, "sel"],
-    Float[torch.Tensor, "sel"],
-    Float[torch.Tensor, "sel"],
-]:
-    met = matmet[mid, i]
+    mid_x: float,
+    x: float,
+    prev_x: float,
+    y: float,
+    prev_y: float,
+    auc: float,
+) -> tuple[float, float]:
     # area under curve
-    auc += (met + prev_met) / 2
+    auc += abs(x - prev_x) * (y + prev_y) / 2
     # area under line
-    aul = abs(mid - i) * met / 2
+    aul = abs(mid_x - x) * y / 2
     # avoid div by 0
-    score = torch.zeros_like(auc)
-    mask = (auc > 0) & (aul > 0)
-    score[mask] += 1 - auc[mask] / aul[mask]
-    return met, auc, score
+    score = 0.0
+    if auc > 0 and aul > 0:
+        score = 1 - auc / aul
+    return auc, score
 
 
-def compute_one_side_max_convex_score(
-    n_sel: int,
-    mid: int,
-    matmet: Float[torch.Tensor, "act act sel"],
-    max_score: Float[torch.Tensor, "sel"],
-    it: range,
-) -> Float[torch.Tensor, "sel"]:
-    auc = torch.zeros(n_sel)
-    prev_met = torch.zeros(n_sel)
-    for i in it:
-        prev_met, auc, score = compute_single_convex_score(
-            mid, i, matmet, prev_met, auc
-        )
-        max_score = torch.maximum(max_score, score)
+def compute_single_one_side_max_convex_score(
+    mid_x: float,
+    xs: list[float],
+    ys: list[float],
+) -> float:
+    auc = prev_y = max_score = 0.0
+    prev_x = mid_x
+    for x, y in zip(xs, ys):
+        auc, score = compute_single_convex_score(mid_x, x, prev_x, y, prev_y, auc)
+        prev_x, prev_y = x, y
+        if score > max_score:
+            max_score = score
+            max_x = x
     return max_score
 
 
-def compute_max_convex_scores(
-    matmet: Float[torch.Tensor, "act act sel"],
-) -> tuple[Float[torch.Tensor, "sel"], Int[torch.Tensor, "sel"]]:
-    """Returns min scores and corresponding idx of act level A"""
-    n_act, n_sel = matmet.shape[1:]
-    max_scores = torch.empty(n_act, n_sel)
-    for mid in range(n_act):
-        max_score = torch.full((n_sel,), -float("inf"))
-        # from mid to left
-        max_score = compute_one_side_max_convex_score(
-            n_sel, mid, matmet, max_score, it=range(mid - 1, -1, -1)
-        )
-        # from mid to right
-        max_score = compute_one_side_max_convex_score(
-            n_sel, mid, matmet, max_score, it=range(mid + 1, n_act)
-        )
-        max_scores[mid] = max_score
-    return max_scores.max(0)
+def compute_single_max_convex_score(
+    mid_x: float,
+    xs: list[float],
+    ys: list[float],
+) -> float:
+    mid_i = None
+    for i, x in enumerate(xs):
+        mid_i = i
+        if x > mid_x:
+            break
+    lxs, lys = xs[:mid_i][::-1], ys[:mid_i][::-1]
+    rxs, rys = xs[mid_i:], ys[mid_i:]
+    return max(
+        compute_single_one_side_max_convex_score(mid_x, lxs, lys),
+        compute_single_one_side_max_convex_score(mid_x, rxs, rys),
+    )
 
 
 def compute_max_plateau_scores(

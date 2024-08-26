@@ -11,7 +11,7 @@ class ExperimentContext:
     model: HookedTransformer
     layer: int
     input_ids: Int[torch.Tensor, "prompt seq"]
-    acts_q_range: tuple[float, float]
+    acts_q_max: float
     n_act: int
     batch_size: int
     resid_acts: Float[torch.Tensor, "prompt seq model"] = field(init=False)
