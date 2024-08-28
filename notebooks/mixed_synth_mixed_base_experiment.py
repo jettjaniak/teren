@@ -240,9 +240,7 @@ class ActivateOneSAEFeaturePerturbation(Perturbation):
 
     def generate(self, resid_acts):
         target = torch.zeros(self.sae.cfg.d_sae)
-        random_index = self.true_indices[
-            torch.randint(0, len(self.true_indices), (1,)).item()
-        ]
+        random_index = random.choice(self.true_indices)
         target[random_index] = self.activation_value
         target = self.sae.decode(target)
         return target - resid_acts
@@ -263,9 +261,7 @@ class CompositeSparsitySAEPerturbation(Perturbation):
         similar_indices = []
         for base_id in base_encoded_ids:
             while True:
-                similar_index = torch.randint(
-                    0, len(self.sparse_map[base_id]), (1,)
-                ).item()
+                similar_index = random.choice(self.sparse_map[base_id])
                 if similar_index not in similar_indices:
                     similar_indices.append(similar_index)
                     break
@@ -433,7 +429,7 @@ for i in range(sparsities.shape[-1]):
     if sparsities[i] != dead_sparsity:
         sparse_map[i] = []
 
-sparsity_diff_threshold = 0.01
+sparsity_diff_threshold = 0.1
 for f_id in tqdm(sparse_map.keys()):
     sparse_map[f_id] = np.where(
         (sparsities - sparsities[f_id]).abs() < sparsity_diff_threshold
